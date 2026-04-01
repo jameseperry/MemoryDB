@@ -68,7 +68,7 @@ async def get_perspectives(conn: asyncpg.Connection, workspace_id: int | None) -
     """Return all perspectives for a workspace (falls back to global defaults)."""
     rows = await conn.fetch(
         """
-        SELECT id, name, instruction
+        SELECT id, workspace_id, name, instruction
         FROM perspectives
         WHERE workspace_id IS NOT DISTINCT FROM $1
            OR workspace_id IS NULL
