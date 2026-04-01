@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     ollama_embed_model: str = "nomic-embed-text"
     mcp_port: int = 8765
+    mcp_workspace_header: str = "X-Memory-Workspace"
 
     # asyncpg pool sizing
     db_min_connections: int = 2

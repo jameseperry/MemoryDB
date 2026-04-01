@@ -27,7 +27,7 @@ async def get_consolidation_report(
                 MAX(o.created_at) AS last_observation_at
             FROM nodes n
             LEFT JOIN observations o ON o.node_id = n.id
-            WHERE n.workspace_id IS NOT DISTINCT FROM $1
+            WHERE n.workspace_id = $1
             GROUP BY n.id
             HAVING n.summary_updated_at IS NULL
                 OR n.summary_updated_at < MAX(o.created_at)
@@ -41,7 +41,7 @@ async def get_consolidation_report(
         perspective_id = await conn.fetchval(
             """
             SELECT id FROM perspectives
-            WHERE (workspace_id IS NOT DISTINCT FROM $1 OR workspace_id IS NULL)
+            WHERE workspace_id = $1 OR workspace_id IS NULL
             ORDER BY CASE WHEN name = 'general' THEN 0 ELSE 1 END,
                      workspace_id NULLS LAST
             LIMIT 1
@@ -64,13 +64,14 @@ async def get_consolidation_report(
                 JOIN nodes na ON na.id = nea.node_id
                 JOIN nodes nb ON nb.id = neb.node_id
                 WHERE nea.perspective_id = $2
-                  AND na.workspace_id IS NOT DISTINCT FROM $1
-                  AND nb.workspace_id IS NOT DISTINCT FROM $1
+                  AND na.workspace_id = $1
+                  AND nb.workspace_id = $1
                   AND 1 - (nea.vector <=> neb.vector) >= 0.75
                   AND NOT EXISTS (
                       SELECT 1 FROM relations r
-                      WHERE (r.from_node_id = nea.node_id AND r.to_node_id = neb.node_id)
-                         OR (r.from_node_id = neb.node_id AND r.to_node_id = nea.node_id)
+                      WHERE r.workspace_id = $1
+                        AND ((r.from_node_id = nea.node_id AND r.to_node_id = neb.node_id)
+                         OR (r.from_node_id = neb.node_id AND r.to_node_id = nea.node_id))
                   )
                 ORDER BY similarity DESC
                 LIMIT 20
@@ -87,10 +88,11 @@ async def get_consolidation_report(
             """
             SELECT n.name, n.entity_type, n.updated_at
             FROM nodes n
-            WHERE n.workspace_id IS NOT DISTINCT FROM $1
+            WHERE n.workspace_id = $1
               AND NOT EXISTS (
                   SELECT 1 FROM relations r
-                  WHERE r.from_node_id = n.id OR r.to_node_id = n.id
+                  WHERE r.workspace_id = $1
+                    AND (r.from_node_id = n.id OR r.to_node_id = n.id)
               )
             ORDER BY n.updated_at DESC
             """,
@@ -107,7 +109,7 @@ async def get_consolidation_report(
                 COUNT(*) FILTER (WHERE operation LIKE '%observation%' OR operation = 'replace_observation') AS updates,
                 COUNT(*) FILTER (WHERE operation LIKE 'delete%') AS deletes
             FROM events
-            WHERE (workspace_id IS NOT DISTINCT FROM $1 OR $1 IS NULL)
+            WHERE workspace_id = $1
               AND occurred_at >= NOW() - INTERVAL '30 days'
             """,
             workspace_id,
@@ -163,7 +165,7 @@ async def get_pending_consolidation(
                 n.summary_updated_at
             FROM nodes n
             LEFT JOIN observations o ON o.node_id = n.id
-            WHERE n.workspace_id IS NOT DISTINCT FROM $1
+            WHERE n.workspace_id = $1
             GROUP BY n.id
             HAVING n.summary_updated_at IS NULL
                 OR n.summary_updated_at < MAX(o.created_at)
@@ -200,15 +202,15 @@ async def get_stats(
             """
             SELECT
                 (SELECT COUNT(*) FROM nodes
-                 WHERE workspace_id IS NOT DISTINCT FROM $1) AS node_count,
+                 WHERE workspace_id = $1) AS node_count,
 
-                (SELECT COUNT(*)
+                 (SELECT COUNT(*)
                  FROM observations o
                  JOIN nodes n ON n.id = o.node_id
-                 WHERE n.workspace_id IS NOT DISTINCT FROM $1) AS observation_count,
+                 WHERE n.workspace_id = $1) AS observation_count,
 
                 (SELECT COUNT(*) FROM relations
-                 WHERE workspace_id IS NOT DISTINCT FROM $1) AS relation_count,
+                 WHERE workspace_id = $1) AS relation_count,
 
                 -- embedding coverage: fraction of observations with at least one embedding
                 CASE WHEN obs_total.cnt = 0 THEN NULL
@@ -218,13 +220,13 @@ async def get_stats(
                 (SELECT COUNT(*) AS cnt
                  FROM observations o
                  JOIN nodes n ON n.id = o.node_id
-                 WHERE n.workspace_id IS NOT DISTINCT FROM $1) AS obs_total,
+                 WHERE n.workspace_id = $1) AS obs_total,
 
                 (SELECT COUNT(DISTINCT e.observation_id) AS cnt
                  FROM embeddings e
                  JOIN observations o ON o.id = e.observation_id
                  JOIN nodes n ON n.id = o.node_id
-                 WHERE n.workspace_id IS NOT DISTINCT FROM $1) AS obs_embedded
+                 WHERE n.workspace_id = $1) AS obs_embedded
             """,
             workspace_id,
         )

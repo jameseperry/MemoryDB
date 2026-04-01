@@ -4,7 +4,7 @@ Usage:
     .venv/bin/python scripts/migrate_json_graph.py <path-to-memory.json> [--workspace NAME]
 
 Options:
-    --workspace NAME   Import into a named workspace (default: default workspace)
+    --workspace NAME   Import into an existing named workspace
     --dry-run          Parse and report what would be imported, without writing
     --skip-embeddings  Skip embedding generation (faster; run search won't work until re-embedded)
 
@@ -54,7 +54,7 @@ def parse_ndjson(path: Path) -> tuple[list[dict], list[dict]]:
 
 async def migrate(
     path: Path,
-    workspace: str | None,
+    workspace: str,
     dry_run: bool,
     skip_embeddings: bool,
 ) -> None:
@@ -118,7 +118,7 @@ async def migrate(
 def main():
     parser = argparse.ArgumentParser(description="Migrate NDJSON memory graph to Postgres.")
     parser.add_argument("path", help="Path to the .json NDJSON graph file")
-    parser.add_argument("--workspace", default=None, help="Target workspace name (default: default workspace)")
+    parser.add_argument("--workspace", required=True, help="Target workspace name (must already exist)")
     parser.add_argument("--dry-run", action="store_true", help="Parse and report without writing")
     parser.add_argument("--skip-embeddings", action="store_true", help="Skip embedding generation")
     args = parser.parse_args()

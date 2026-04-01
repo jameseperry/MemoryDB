@@ -30,7 +30,7 @@ async def create_entities(
 
             # ON CONFLICT can't target partial indexes, so check existence explicitly.
             existing = await conn.fetchrow(
-                "SELECT id FROM nodes WHERE workspace_id IS NOT DISTINCT FROM $1 AND name = $2",
+                "SELECT id FROM nodes WHERE workspace_id = $1 AND name = $2",
                 workspace_id, name,
             )
             if existing:
@@ -111,7 +111,7 @@ async def delete_entities(
             result = await conn.fetchval(
                 """
                 DELETE FROM nodes
-                WHERE workspace_id IS NOT DISTINCT FROM $1 AND name = $2
+                WHERE workspace_id = $1 AND name = $2
                 RETURNING name
                 """,
                 workspace_id, name,
@@ -141,7 +141,7 @@ async def open_nodes(
             """
             SELECT id, name, entity_type, summary, tags, created_at, updated_at
             FROM nodes
-            WHERE workspace_id IS NOT DISTINCT FROM $1 AND name = ANY($2)
+            WHERE workspace_id = $1 AND name = ANY($2)
             """,
             workspace_id, names,
         )
@@ -173,9 +173,10 @@ async def open_nodes(
             FROM relations r
             JOIN nodes fn ON fn.id = r.from_node_id
             JOIN nodes tn ON tn.id = r.to_node_id
-            WHERE r.from_node_id = ANY($1) OR r.to_node_id = ANY($1)
+            WHERE r.workspace_id = $2
+              AND (r.from_node_id = ANY($1) OR r.to_node_id = ANY($1))
             """,
-            node_ids,
+            node_ids, workspace_id,
         )
 
         entities = []
@@ -218,7 +219,7 @@ async def get_nodes_by_type(
             """
             SELECT name, entity_type, summary, tags, updated_at
             FROM nodes
-            WHERE workspace_id IS NOT DISTINCT FROM $1 AND entity_type = $2
+            WHERE workspace_id = $1 AND entity_type = $2
             ORDER BY name
             """,
             workspace_id, entity_type,
@@ -253,7 +254,7 @@ async def get_recently_modified(
             """
             SELECT name, entity_type, summary, updated_at
             FROM nodes
-            WHERE workspace_id IS NOT DISTINCT FROM $1
+            WHERE workspace_id = $1
               AND updated_at >= NOW() - ($2 || ' days')::INTERVAL
             ORDER BY updated_at DESC
             LIMIT $3
@@ -289,7 +290,7 @@ async def set_summary(
             """
             UPDATE nodes
             SET summary = $3, summary_updated_at = NOW(), updated_at = NOW()
-            WHERE workspace_id IS NOT DISTINCT FROM $1 AND name = $2
+            WHERE workspace_id = $1 AND name = $2
             RETURNING name, summary, updated_at
             """,
             workspace_id, name, summary,
@@ -322,7 +323,7 @@ async def set_tags(
             """
             UPDATE nodes
             SET tags = $3, updated_at = NOW()
-            WHERE workspace_id IS NOT DISTINCT FROM $1 AND name = $2
+            WHERE workspace_id = $1 AND name = $2
             RETURNING name, tags
             """,
             workspace_id, name, tags,

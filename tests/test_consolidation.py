@@ -90,13 +90,12 @@ async def test_consolidation_report_structure(ws):
     assert "linked_node" in stale_names
 
 
-async def test_stats_workspace_isolation(ws):
-    """Stats for the test workspace don't include default workspace data."""
+async def test_stats_workspace_isolation(ws, other_ws):
+    """Stats for the test workspace don't include data from another workspace."""
     await create_entities([{"name": "test_only", "entity_type": "x"}], workspace=ws)
     stats = await get_stats(workspace=ws)
-    default_stats = await get_stats(workspace=None)
+    other_stats = await get_stats(workspace=other_ws)
 
     # Test workspace has exactly what we put in
     assert stats["node_count"] == 1
-    # Default workspace is independent (may be 0 or contain real data)
-    assert "test_only" not in str(default_stats)
+    assert other_stats["node_count"] == 0

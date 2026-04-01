@@ -28,7 +28,7 @@ def upgrade() -> None:
     op.execute("""
         CREATE TABLE nodes (
             id                  BIGSERIAL PRIMARY KEY,
-            workspace_id        INT REFERENCES workspaces(id) ON DELETE CASCADE,
+            workspace_id        INT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
             name                TEXT NOT NULL,
             entity_type         TEXT NOT NULL,
             summary             TEXT,
@@ -38,13 +38,6 @@ def upgrade() -> None:
             updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             CONSTRAINT uq_nodes_workspace_name UNIQUE (workspace_id, name)
         )
-    """)
-
-    # NULL workspace_id means default workspace — enforce uniqueness there too
-    op.execute("""
-        CREATE UNIQUE INDEX uq_nodes_null_workspace_name
-            ON nodes (name)
-            WHERE workspace_id IS NULL
     """)
 
     op.execute("CREATE INDEX idx_nodes_workspace_type ON nodes (workspace_id, entity_type)")
@@ -72,20 +65,13 @@ def upgrade() -> None:
     op.execute("""
         CREATE TABLE relations (
             id              BIGSERIAL PRIMARY KEY,
-            workspace_id    INT REFERENCES workspaces(id) ON DELETE CASCADE,
+            workspace_id    INT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
             from_node_id    BIGINT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
             to_node_id      BIGINT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
             relation_type   TEXT NOT NULL,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             CONSTRAINT uq_relations UNIQUE (workspace_id, from_node_id, to_node_id, relation_type)
         )
-    """)
-
-    # NULL workspace_id uniqueness for relations
-    op.execute("""
-        CREATE UNIQUE INDEX uq_relations_null_workspace
-            ON relations (from_node_id, to_node_id, relation_type)
-            WHERE workspace_id IS NULL
     """)
 
     op.execute("CREATE INDEX idx_relations_from ON relations (from_node_id)")
@@ -160,7 +146,7 @@ def upgrade() -> None:
         CREATE TABLE events (
             id          BIGSERIAL PRIMARY KEY,
             node_id     BIGINT REFERENCES nodes(id) ON DELETE SET NULL,
-            workspace_id INT REFERENCES workspaces(id) ON DELETE CASCADE,
+            workspace_id INT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
             operation   TEXT NOT NULL,   -- 'create_node', 'add_observation', 'delete_node', etc.
             detail      JSONB,
             occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

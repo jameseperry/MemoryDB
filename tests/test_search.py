@@ -79,9 +79,9 @@ async def test_search_limit(ws):
     assert len(results_1) <= 1
 
 
-async def test_search_workspace_isolation(ws):
-    """Results from the test workspace do not bleed into the default workspace."""
+async def test_search_workspace_isolation(ws, other_ws):
+    """Results from one workspace do not bleed into another workspace."""
     await _populate(ws)
-    results = await search_nodes("Tokio async runtime", mode="text", workspace=None)
+    results = await search_nodes("Tokio async runtime", mode="text", workspace=other_ws)
     names = [r["name"] for r in results]
     assert "rust_project" not in names

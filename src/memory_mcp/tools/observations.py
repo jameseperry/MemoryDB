@@ -9,10 +9,10 @@ from memory_mcp.embeddings import delete_observation_embeddings, embed_observati
 
 
 async def _get_node_id(
-    conn: asyncpg.Connection, workspace_id: int | None, name: str
+    conn: asyncpg.Connection, workspace_id: int, name: str
 ) -> int | None:
     return await conn.fetchval(
-        "SELECT id FROM nodes WHERE workspace_id IS NOT DISTINCT FROM $1 AND name = $2",
+        "SELECT id FROM nodes WHERE workspace_id = $1 AND name = $2",
         workspace_id, name,
     )
 

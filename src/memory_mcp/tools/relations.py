@@ -6,10 +6,10 @@ from memory_mcp.db import get_pool, resolve_workspace_id
 
 
 async def _get_node_id(
-    conn: asyncpg.Connection, workspace_id: int | None, name: str
+    conn: asyncpg.Connection, workspace_id: int, name: str
 ) -> int | None:
     return await conn.fetchval(
-        "SELECT id FROM nodes WHERE workspace_id IS NOT DISTINCT FROM $1 AND name = $2",
+        "SELECT id FROM nodes WHERE workspace_id = $1 AND name = $2",
         workspace_id, name,
     )
 
@@ -90,7 +90,7 @@ async def delete_relations(
             result = await conn.execute(
                 """
                 DELETE FROM relations
-                WHERE workspace_id IS NOT DISTINCT FROM $1
+                WHERE workspace_id = $1
                   AND from_node_id = $2
                   AND to_node_id = $3
                   AND relation_type = $4
@@ -133,7 +133,7 @@ async def update_relation_type(
             """
             UPDATE relations
             SET relation_type = $5
-            WHERE workspace_id IS NOT DISTINCT FROM $1
+            WHERE workspace_id = $1
               AND from_node_id = $2
               AND to_node_id = $3
               AND relation_type = $4
@@ -178,7 +178,7 @@ async def get_relations_between(
             FROM relations r
             JOIN nodes fn ON fn.id = r.from_node_id
             JOIN nodes tn ON tn.id = r.to_node_id
-            WHERE r.workspace_id IS NOT DISTINCT FROM $1
+            WHERE r.workspace_id = $1
               AND ((r.from_node_id = $2 AND r.to_node_id = $3)
                 OR (r.from_node_id = $3 AND r.to_node_id = $2))
             """,

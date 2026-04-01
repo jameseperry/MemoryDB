@@ -4,6 +4,9 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from memory_mcp.db import close_pool, init_pool
 from memory_mcp.tools import (
@@ -15,6 +18,31 @@ from memory_mcp.tools import (
     search,
 )
 from memory_mcp.config import settings
+
+
+class RequireWorkspaceHeaderMiddleware:
+    """Reject HTTP MCP requests that do not declare a workspace."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            request = Request(scope)
+            workspace = request.headers.get(settings.mcp_workspace_header)
+            if workspace is None or not workspace.strip():
+                response = JSONResponse(
+                    {
+                        "error": (
+                            f"Missing required header: {settings.mcp_workspace_header}"
+                        )
+                    },
+                    status_code=400,
+                )
+                await response(scope, receive, send)
+                return
+
+        await self.app(scope, receive, send)
 
 
 @asynccontextmanager
@@ -70,7 +98,12 @@ mcp.add_tool(consolidation.get_stats)
 
 
 def main() -> None:
-    mcp.run(transport="sse", host="0.0.0.0", port=settings.mcp_port)
+    mcp.run(
+        transport="sse",
+        host="0.0.0.0",
+        port=settings.mcp_port,
+        middleware=[Middleware(RequireWorkspaceHeaderMiddleware)],
+    )
 
 
 if __name__ == "__main__":

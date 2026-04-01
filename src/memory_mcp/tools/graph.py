@@ -24,7 +24,7 @@ async def get_neighborhood(
             WITH RECURSIVE neighborhood(id, name, entity_type, summary, tags, depth, visited) AS (
                 SELECT n.id, n.name, n.entity_type, n.summary, n.tags, 0, ARRAY[n.id]
                 FROM nodes n
-                WHERE n.workspace_id IS NOT DISTINCT FROM $1 AND n.name = $2
+                WHERE n.workspace_id = $1 AND n.name = $2
 
                 UNION ALL
 
@@ -33,12 +33,13 @@ async def get_neighborhood(
                        nb.visited || n.id
                 FROM nodes n
                 JOIN relations r
-                    ON r.from_node_id = n.id OR r.to_node_id = n.id
+                    ON r.workspace_id = $1
+                   AND (r.from_node_id = n.id OR r.to_node_id = n.id)
                 JOIN neighborhood nb
                     ON (r.from_node_id = nb.id OR r.to_node_id = nb.id)
                 WHERE nb.depth < $3
                   AND NOT n.id = ANY(nb.visited)
-                  AND n.workspace_id IS NOT DISTINCT FROM $1
+                  AND n.workspace_id = $1
             )
             SELECT DISTINCT id, name, entity_type, summary, tags
             FROM neighborhood
@@ -57,9 +58,10 @@ async def get_neighborhood(
             FROM relations r
             JOIN nodes fn ON fn.id = r.from_node_id
             JOIN nodes tn ON tn.id = r.to_node_id
-            WHERE r.from_node_id = ANY($1) AND r.to_node_id = ANY($1)
+            WHERE r.workspace_id = $2
+              AND r.from_node_id = ANY($1) AND r.to_node_id = ANY($1)
             """,
-            node_ids,
+            node_ids, workspace_id,
         )
 
     return {
@@ -98,7 +100,7 @@ async def get_path(
             WITH RECURSIVE path_search(id, name, path_ids, path_names, depth) AS (
                 SELECT n.id, n.name, ARRAY[n.id], ARRAY[n.name], 0
                 FROM nodes n
-                WHERE n.workspace_id IS NOT DISTINCT FROM $1 AND n.name = $2
+                WHERE n.workspace_id = $1 AND n.name = $2
 
                 UNION ALL
 
@@ -108,12 +110,13 @@ async def get_path(
                        ps.depth + 1
                 FROM nodes n
                 JOIN relations r
-                    ON r.from_node_id = n.id OR r.to_node_id = n.id
+                    ON r.workspace_id = $1
+                   AND (r.from_node_id = n.id OR r.to_node_id = n.id)
                 JOIN path_search ps
                     ON (r.from_node_id = ps.id OR r.to_node_id = ps.id)
                 WHERE NOT n.id = ANY(ps.path_ids)
                   AND ps.depth < 10
-                  AND n.workspace_id IS NOT DISTINCT FROM $1
+                  AND n.workspace_id = $1
             )
             SELECT path_ids, path_names
             FROM path_search
@@ -140,10 +143,11 @@ async def get_path(
                 FROM relations r
                 JOIN nodes fn ON fn.id = r.from_node_id
                 JOIN nodes tn ON tn.id = r.to_node_id
-                WHERE (r.from_node_id = $1 AND r.to_node_id = $2)
-                   OR (r.from_node_id = $2 AND r.to_node_id = $1)
+                WHERE r.workspace_id = $3
+                  AND ((r.from_node_id = $1 AND r.to_node_id = $2)
+                   OR (r.from_node_id = $2 AND r.to_node_id = $1))
                 """,
-                a, b,
+                a, b, workspace_id,
             )
             relations.extend(
                 {"from": r["from_name"], "to": r["to_name"], "relation_type": r["relation_type"]}
@@ -168,10 +172,11 @@ async def get_orphans(
             """
             SELECT n.name, n.entity_type, n.summary, n.updated_at
             FROM nodes n
-            WHERE n.workspace_id IS NOT DISTINCT FROM $1
+            WHERE n.workspace_id = $1
               AND NOT EXISTS (
                   SELECT 1 FROM relations r
-                  WHERE r.from_node_id = n.id OR r.to_node_id = n.id
+                  WHERE r.workspace_id = $1
+                    AND (r.from_node_id = n.id OR r.to_node_id = n.id)
               )
             ORDER BY n.updated_at DESC
             """,
@@ -210,14 +215,15 @@ async def get_relation_gaps(
             FROM observations o
             JOIN nodes src ON src.id = o.node_id
             JOIN nodes ref
-                ON ref.workspace_id IS NOT DISTINCT FROM src.workspace_id
+                ON ref.workspace_id = src.workspace_id
                AND ref.id != src.id
                AND o.content ILIKE '%' || ref.name || '%'
-            WHERE src.workspace_id IS NOT DISTINCT FROM $1
+            WHERE src.workspace_id = $1
               AND NOT EXISTS (
                   SELECT 1 FROM relations r
-                  WHERE (r.from_node_id = src.id AND r.to_node_id = ref.id)
-                     OR (r.from_node_id = ref.id AND r.to_node_id = src.id)
+                  WHERE r.workspace_id = $1
+                    AND ((r.from_node_id = src.id AND r.to_node_id = ref.id)
+                     OR (r.from_node_id = ref.id AND r.to_node_id = src.id))
               )
             GROUP BY src.name, ref.name
             ORDER BY reference_count DESC
@@ -255,7 +261,7 @@ async def find_similar_nodes(
         perspective_id = await conn.fetchval(
             """
             SELECT id FROM perspectives
-            WHERE (workspace_id IS NOT DISTINCT FROM $1 OR workspace_id IS NULL)
+            WHERE workspace_id = $1 OR workspace_id IS NULL
             ORDER BY CASE WHEN name = 'general' THEN 0 ELSE 1 END,
                      workspace_id NULLS LAST
             LIMIT 1
@@ -280,13 +286,14 @@ async def find_similar_nodes(
             JOIN nodes na ON na.id = nea.node_id
             JOIN nodes nb ON nb.id = neb.node_id
             WHERE nea.perspective_id = $2
-              AND na.workspace_id IS NOT DISTINCT FROM $1
-              AND nb.workspace_id IS NOT DISTINCT FROM $1
+              AND na.workspace_id = $1
+              AND nb.workspace_id = $1
               AND 1 - (nea.vector <=> neb.vector) >= $3
               AND NOT EXISTS (
                   SELECT 1 FROM relations r
-                  WHERE (r.from_node_id = nea.node_id AND r.to_node_id = neb.node_id)
-                     OR (r.from_node_id = neb.node_id AND r.to_node_id = nea.node_id)
+                  WHERE r.workspace_id = $1
+                    AND ((r.from_node_id = nea.node_id AND r.to_node_id = neb.node_id)
+                     OR (r.from_node_id = neb.node_id AND r.to_node_id = nea.node_id))
               )
             ORDER BY similarity DESC
             LIMIT $4

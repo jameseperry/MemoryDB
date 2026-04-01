@@ -3,6 +3,7 @@
 from typing import Any
 
 import asyncpg
+from fastmcp.server.dependencies import get_http_headers
 
 from memory_mcp.config import settings
 
@@ -35,22 +36,48 @@ async def close_pool() -> None:
 
 async def resolve_workspace_id(
     conn: asyncpg.Connection, workspace: str | None
-) -> int | None:
-    """Resolve a workspace name to its integer ID, creating it if necessary.
+) -> int:
+    """Resolve a workspace name to its integer ID.
 
-    Returns None for the default workspace (workspace=None).
+    The effective workspace must be provided either explicitly or via the
+    configured HTTP header, and it must already exist.
     """
-    if workspace is None:
-        return None
+    workspace = resolve_effective_workspace_name(workspace)
     row = await conn.fetchrow(
         "SELECT id FROM workspaces WHERE name = $1", workspace
     )
-    if row:
-        return row["id"]
-    row = await conn.fetchrow(
-        "INSERT INTO workspaces (name) VALUES ($1) RETURNING id", workspace
-    )
+    if row is None:
+        raise ValueError(f"Workspace '{workspace}' not found")
     return row["id"]
+
+
+def resolve_effective_workspace_name(workspace: str | None) -> str:
+    """Resolve the effective workspace name for the current request.
+
+    Precedence:
+    1. `X-Memory-Workspace` header, when present on an HTTP MCP request
+    2. Explicit `workspace` argument for direct/internal callers
+
+    If both are present they must match, otherwise the request is rejected.
+    """
+    header_key = settings.mcp_workspace_header.lower()
+    header_workspace = get_http_headers().get(header_key)
+    if header_workspace is not None:
+        header_workspace = header_workspace.strip()
+        if not header_workspace:
+            raise ValueError(f"{settings.mcp_workspace_header} header cannot be empty")
+        if workspace is not None and workspace != header_workspace:
+            raise ValueError(
+                "Workspace parameter does not match "
+                f"{settings.mcp_workspace_header} header"
+            )
+        return header_workspace
+    if workspace is None:
+        raise ValueError("Workspace is required")
+    workspace = workspace.strip()
+    if not workspace:
+        raise ValueError("Workspace is required")
+    return workspace
 
 
 def serialize(row: asyncpg.Record | dict | None) -> dict | None:

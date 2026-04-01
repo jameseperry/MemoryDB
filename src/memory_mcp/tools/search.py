@@ -39,7 +39,7 @@ async def _search_text(conn, workspace_id, query: str, limit: int) -> list[dict]
             ts_rank(o.content_tsv, plainto_tsquery('english', $2), 1) AS score
         FROM observations o
         JOIN nodes n ON n.id = o.node_id
-        WHERE n.workspace_id IS NOT DISTINCT FROM $1
+        WHERE n.workspace_id = $1
           AND o.content_tsv @@ plainto_tsquery('english', $2)
         ORDER BY score DESC
         LIMIT $3
@@ -91,7 +91,7 @@ async def _search_embedding(conn, workspace_id, query: str, limit: int) -> list[
             JOIN observations o ON o.id = e.observation_id
             JOIN nodes n ON n.id = o.node_id
             WHERE e.perspective_id = $2
-              AND n.workspace_id IS NOT DISTINCT FROM $1
+              AND n.workspace_id = $1
             ORDER BY e.vector <=> $3::vector
             LIMIT $4
             """,

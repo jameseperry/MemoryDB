@@ -101,9 +101,9 @@ async def test_set_tags(ws):
     assert result["tags"] == ["only"]
 
 
-async def test_workspace_isolation(ws):
-    """Nodes in the test workspace are invisible to the default workspace."""
+async def test_workspace_isolation(ws, other_ws):
+    """Nodes in one workspace are invisible to a different workspace."""
     await create_entities([{"name": "secret", "entity_type": "x"}], workspace=ws)
 
-    opened = await open_nodes(["secret"], workspace=None)
+    opened = await open_nodes(["secret"], workspace=other_ws)
     assert "secret" in opened["not_found"]

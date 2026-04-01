@@ -70,8 +70,7 @@ async def get_perspectives(conn: asyncpg.Connection, workspace_id: int | None) -
         """
         SELECT id, workspace_id, name, instruction
         FROM perspectives
-        WHERE workspace_id IS NOT DISTINCT FROM $1
-           OR workspace_id IS NULL
+        WHERE workspace_id = $1 OR workspace_id IS NULL
         ORDER BY workspace_id NULLS LAST, name
         """,
         workspace_id,
