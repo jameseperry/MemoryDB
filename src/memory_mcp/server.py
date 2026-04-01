@@ -4,9 +4,14 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 from fastmcp import FastMCP
+from fastmcp.server.http import create_sse_app
+from fastmcp.utilities.lifespan import combine_lifespans
+from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.types import Receive, Scope, Send
+import uvicorn
 
 from memory_mcp.db import close_pool, init_pool
 from memory_mcp.tools import (
@@ -97,12 +102,61 @@ mcp.add_tool(consolidation.get_pending_consolidation)
 mcp.add_tool(consolidation.get_stats)
 
 
+class TransportMux:
+    """Dispatch requests to the appropriate MCP transport app."""
+
+    def __init__(self, app, streamable_http_app, sse_app):
+        self.app = app
+        self.streamable_http_app = streamable_http_app
+        self.sse_app = sse_app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path == "/mcp" or path.startswith("/mcp/"):
+            await self.streamable_http_app(scope, receive, send)
+            return
+        if path == "/sse" or path.startswith("/sse/"):
+            await self.sse_app(scope, receive, send)
+            return
+
+        response = JSONResponse({"error": "Not found"}, status_code=404)
+        await response(scope, receive, send)
+
+
+def build_app() -> Starlette:
+    middleware = [Middleware(RequireWorkspaceHeaderMiddleware)]
+    streamable_http_app = mcp.http_app(
+        path="/mcp",
+        transport="streamable-http",
+        middleware=middleware,
+    )
+    sse_app = create_sse_app(
+        server=mcp,
+        message_path="/sse/messages/",
+        sse_path="/sse",
+        middleware=middleware,
+    )
+
+    return Starlette(
+        routes=[],
+        middleware=[Middleware(TransportMux, streamable_http_app, sse_app)],
+        lifespan=combine_lifespans(
+            streamable_http_app.lifespan,
+            sse_app.lifespan,
+        ),
+    )
+
+
 def main() -> None:
-    mcp.run(
-        transport="sse",
+    uvicorn.run(
+        build_app(),
         host="0.0.0.0",
         port=settings.mcp_port,
-        middleware=[Middleware(RequireWorkspaceHeaderMiddleware)],
+        lifespan="on",
     )
 
 
