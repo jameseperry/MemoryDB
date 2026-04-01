@@ -11,6 +11,7 @@ dependencies = [
     "asyncpg>=0.31.0",
     "alembic>=1.18.0",
     "pydantic-settings>=2.0.0",
+    "click>=8.1.0",
     "sentence-transformers>=3.0.0",
     "einops",
 ]
@@ -35,3 +36,4 @@ testpaths = ["tests"]
 
 [project.scripts]
 memory-mcp = "memory_mcp.server:main"
+memory-admin = "memory_mcp.admin_cli:main"
