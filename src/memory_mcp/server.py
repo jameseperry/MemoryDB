@@ -70,7 +70,7 @@ mcp.add_tool(consolidation.get_stats)
 
 
 def main() -> None:
-    mcp.run(transport="sse", port=settings.mcp_port)
+    mcp.run(transport="sse", host="0.0.0.0", port=settings.mcp_port)
 
 
 if __name__ == "__main__":

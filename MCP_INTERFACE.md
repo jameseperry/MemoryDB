@@ -230,6 +230,7 @@ returns:
 Schema needs:
 - Embedding mode: reuses `embeddings` table, filters by node.
 - Text mode: `tsvector` generated column on `observations.content` with GIN index.
+  Note: text mode scores are keyword match weights, not semantic rankings. Use embedding mode when ranking quality matters.
 
 ---
 
@@ -438,6 +439,8 @@ returns:
 Schema needs:
 - Embedding mode: `embeddings` table keyed by `(observation_id, perspective_id)` with vector column, HNSW index.
 - Text mode: `tsvector` generated column on `observations.content` with GIN index (shared with `query_observations`).
+  Note: text mode scores (`ts_rank`) are keyword match weights, not semantic rankings. Use as a filter with approximate ordering,
+  not as a reliable relevance signal. Prefer embedding mode when ranking quality matters.
 
 ---
 

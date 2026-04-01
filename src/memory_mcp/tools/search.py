@@ -36,7 +36,7 @@ async def _search_text(conn, workspace_id, query: str, limit: int) -> list[dict]
             n.entity_type,
             n.summary,
             o.content AS matched_observation,
-            ts_rank(o.content_tsv, plainto_tsquery('english', $2)) AS score
+            ts_rank(o.content_tsv, plainto_tsquery('english', $2), 1) AS score
         FROM observations o
         JOIN nodes n ON n.id = o.node_id
         WHERE n.workspace_id IS NOT DISTINCT FROM $1

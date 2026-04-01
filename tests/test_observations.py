@@ -87,3 +87,23 @@ async def test_query_observations_text_mode(ws):
     results = await query_observations("n", "fox", mode="text", workspace=ws)
     assert len(results) >= 1
     assert any("fox" in r["content"] for r in results)
+
+
+async def test_query_observations_embedding_mode(ws):
+    await create_entities([
+        {"name": "n", "entity_type": "x", "observations": [
+            "Rust is a systems programming language focused on safety and performance.",
+            "Python is popular for data science and machine learning.",
+            "Sourdough bread requires a live fermentation culture.",
+        ]},
+    ], workspace=ws)
+
+    results = await query_observations("n", "low-level memory safe programming", mode="embedding", workspace=ws)
+    assert len(results) >= 1
+    # Rust observation should rank above sourdough
+    contents = [r["content"] for r in results]
+    assert any("Rust" in c for c in contents)
+    if any("Sourdough" in c for c in contents):
+        rust_idx = next(i for i, c in enumerate(contents) if "Rust" in c)
+        bread_idx = next(i for i, c in enumerate(contents) if "Sourdough" in c)
+        assert rust_idx < bread_idx

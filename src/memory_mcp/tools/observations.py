@@ -1,9 +1,11 @@
 """Observation management tools."""
 
+import asyncio
+
 import asyncpg
 
 from memory_mcp.db import get_pool, resolve_workspace_id
-from memory_mcp.embeddings import delete_observation_embeddings, embed_observations
+from memory_mcp.embeddings import delete_observation_embeddings, embed_observations, embed_query, get_perspectives
 
 
 async def _get_node_id(
@@ -199,7 +201,7 @@ async def query_observations(
             rows = await conn.fetch(
                 """
                 SELECT ordinal, content,
-                       ts_rank(content_tsv, plainto_tsquery('english', $2)) AS score
+                       ts_rank(content_tsv, plainto_tsquery('english', $2), 1) AS score
                 FROM observations
                 WHERE node_id = $1
                   AND content_tsv @@ plainto_tsquery('english', $2)
@@ -212,8 +214,39 @@ async def query_observations(
                 for r in rows
             ]
 
-        # Embedding mode — requires embedding pipeline; returns empty until implemented
-        raise NotImplementedError(
-            "Embedding mode for query_observations requires the embedding pipeline. "
-            "Use mode='text' for now, or implement the embedding service."
-        )
+        # Embedding mode: embed query per perspective, score against per-observation embeddings.
+        perspectives = await get_perspectives(conn, workspace_id)
+        if not perspectives:
+            return []
+
+        loop = asyncio.get_event_loop()
+        vectors = await asyncio.gather(*[
+            loop.run_in_executor(None, embed_query, query, p["instruction"])
+            for p in perspectives
+        ])
+
+        candidates: dict[int, dict] = {}  # ordinal → best result
+        for perspective, vector in zip(perspectives, vectors):
+            rows = await conn.fetch(
+                """
+                SELECT o.ordinal, o.content,
+                       1 - (e.vector <=> $3::vector) AS score
+                FROM embeddings e
+                JOIN observations o ON o.id = e.observation_id
+                WHERE o.node_id = $1
+                  AND e.perspective_id = $2
+                ORDER BY e.vector <=> $3::vector
+                """,
+                node_id, perspective["id"], str(vector),
+            )
+            for row in rows:
+                ordinal = row["ordinal"]
+                score = float(row["score"])
+                if ordinal not in candidates or score > candidates[ordinal]["score"]:
+                    candidates[ordinal] = {
+                        "ordinal": ordinal,
+                        "content": row["content"],
+                        "score": score,
+                    }
+
+        return sorted(candidates.values(), key=lambda r: r["score"], reverse=True)
