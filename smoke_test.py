@@ -13,10 +13,15 @@ from memory_mcp.tools.nodes import (
 )
 from memory_mcp.tools.observations import add_observations, replace_observation, delete_observations
 from memory_mcp.tools.relations import create_relations, delete_relations, get_relations_between
+from memory_mcp.tools.graph import get_neighborhood, get_path, get_orphans, get_relation_gaps
+from memory_mcp.tools.consolidation import get_stats, get_pending_consolidation
 
 
 async def main():
     await init_pool()
+
+    # Ensure clean state in case a prior run failed mid-test.
+    await delete_entities(["test_node_a", "test_node_b", "test_orphan"])
 
     # --- nodes ---
     print("create_entities...")
@@ -96,10 +101,62 @@ async def main():
     assert result["deleted"] == 1
     print(f"  deleted={result['deleted']}")
 
+    # Restore relation for graph traversal tests.
+    await create_relations([
+        {"from_entity": "test_node_a", "to_entity": "test_node_b", "relation_type": "relates_to"}
+    ])
+
+    # --- graph traversal ---
+    print("get_neighborhood...")
+    result = await get_neighborhood("test_node_a", depth=1)
+    names = {n["name"] for n in result["nodes"]}
+    assert "test_node_a" in names and "test_node_b" in names, names
+    print(f"  nodes in neighborhood: {sorted(names)}")
+
+    print("get_path...")
+    result = await get_path("test_node_a", "test_node_b")
+    assert result["found"] is True
+    assert result["path"] == ["test_node_a", "test_node_b"]
+    print(f"  path: {result['path']}")
+
+    result = await get_path("test_node_a", "nonexistent")
+    assert result["found"] is False
+    print(f"  no path to nonexistent: found={result['found']}")
+
+    print("get_orphans...")
+    # test_node_b has a relation to test_node_a; check a fresh node is orphaned
+    await create_entities([{"name": "test_orphan", "entity_type": "test"}])
+    result = await get_orphans()
+    orphan_names = {r["name"] for r in result}
+    assert "test_orphan" in orphan_names
+    assert "test_node_a" not in orphan_names  # has a relation
+    print(f"  orphans include test_orphan: OK")
+
+    print("get_relation_gaps...")
+    # Add an observation referencing test_node_b by name but not yet linked via relation from orphan
+    await add_observations([{"entity_name": "test_orphan", "contents": ["This references test_node_b directly"]}])
+    result = await get_relation_gaps()
+    gaps = {(r["node"], r["referenced_name"]) for r in result}
+    assert ("test_orphan", "test_node_b") in gaps, f"gaps={gaps}"
+    print(f"  found gap: test_orphan → test_node_b")
+
+    # --- consolidation ---
+    print("get_stats...")
+    result = await get_stats()
+    assert result["node_count"] >= 3
+    assert result["observation_count"] >= 1
+    print(f"  nodes={result['node_count']}, obs={result['observation_count']}, relations={result['relation_count']}, embed_coverage={result['embedding_coverage']}")
+
+    print("get_pending_consolidation...")
+    result = await get_pending_consolidation()
+    pending_names = {r["name"] for r in result}
+    assert "test_orphan" in pending_names  # newly created, no summary
+    print(f"  {len(result)} nodes pending consolidation")
+
     # --- cleanup ---
     print("delete_entities...")
-    result = await delete_entities(["test_node_a", "test_node_b", "nonexistent"])
-    assert set(result["deleted"]) == {"test_node_a", "test_node_b"}
+    result = await delete_entities(["test_node_a", "test_node_b", "test_orphan", "nonexistent"])
+    assert set(result["deleted"]) == {"test_node_a", "test_node_b", "test_orphan"}
     assert result["not_found"] == ["nonexistent"]
     print(f"  deleted={result['deleted']}, not_found={result['not_found']}")
 

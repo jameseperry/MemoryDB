@@ -44,14 +44,14 @@ async def add_observations(
                 node_id,
             )
 
+            next_ordinal = current_max + 1
+            await conn.executemany(
+                "INSERT INTO observations (node_id, ordinal, content) VALUES ($1, $2, $3)",
+                [(node_id, next_ordinal + i, content) for i, content in enumerate(contents)],
+            )
             rows = await conn.fetch(
-                """
-                INSERT INTO observations (node_id, ordinal, content)
-                SELECT $1, $2 + gs, unnest
-                FROM unnest($3::text[]) WITH ORDINALITY AS t(unnest, gs)
-                RETURNING id, ordinal, content
-                """,
-                node_id, current_max, contents,
+                "SELECT id, ordinal, content FROM observations WHERE node_id = $1 AND ordinal >= $2 ORDER BY ordinal",
+                node_id, next_ordinal,
             )
 
             await embed_observations(

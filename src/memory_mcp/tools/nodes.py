@@ -62,14 +62,14 @@ async def create_entities(
                     "SELECT COALESCE(MAX(ordinal), -1) FROM observations WHERE node_id = $1",
                     node_id,
                 )
+                next_ordinal = current_max + 1
+                await conn.executemany(
+                    "INSERT INTO observations (node_id, ordinal, content) VALUES ($1, $2, $3)",
+                    [(node_id, next_ordinal + i, content) for i, content in enumerate(obs_contents)],
+                )
                 new_obs_ids = await conn.fetch(
-                    """
-                    INSERT INTO observations (node_id, ordinal, content)
-                    SELECT $1, $2 + gs, unnest
-                    FROM unnest($3::text[]) WITH ORDINALITY AS t(unnest, gs)
-                    RETURNING id
-                    """,
-                    node_id, current_max, obs_contents,
+                    "SELECT id FROM observations WHERE node_id = $1 AND ordinal >= $2",
+                    node_id, next_ordinal,
                 )
                 await embed_observations(
                     conn, node_id, workspace_id, [r["id"] for r in new_obs_ids]

@@ -12,6 +12,7 @@ dependencies = [
     "alembic>=1.18.0",
     "pydantic-settings>=2.0.0",
     "sentence-transformers>=3.0.0",
+    "einops",
 ]
 # Note: torch is a transitive dependency of sentence-transformers.
 # For CUDA on the basement server, install torch separately first:
