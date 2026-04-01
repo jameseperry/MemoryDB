@@ -1,10 +1,9 @@
 """Node CRUD tools."""
 
-from datetime import datetime, timezone
-
 import asyncpg
 
 from memory_mcp.db import get_pool, resolve_workspace_id
+from memory_mcp.embeddings import embed_observations
 
 
 async def create_entities(
@@ -63,12 +62,17 @@ async def create_entities(
                     "SELECT COALESCE(MAX(ordinal), -1) FROM observations WHERE node_id = $1",
                     node_id,
                 )
-                await conn.executemany(
-                    "INSERT INTO observations (node_id, ordinal, content) VALUES ($1, $2, $3)",
-                    [
-                        (node_id, current_max + 1 + i, content)
-                        for i, content in enumerate(obs_contents)
-                    ],
+                new_obs_ids = await conn.fetch(
+                    """
+                    INSERT INTO observations (node_id, ordinal, content)
+                    SELECT $1, $2 + gs, unnest
+                    FROM unnest($3::text[]) WITH ORDINALITY AS t(unnest, gs)
+                    RETURNING id
+                    """,
+                    node_id, current_max, obs_contents,
+                )
+                await embed_observations(
+                    conn, node_id, workspace_id, [r["id"] for r in new_obs_ids]
                 )
 
             await conn.execute(

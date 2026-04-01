@@ -11,7 +11,11 @@ dependencies = [
     "asyncpg>=0.31.0",
     "alembic>=1.18.0",
     "pydantic-settings>=2.0.0",
+    "sentence-transformers>=3.0.0",
 ]
+# Note: torch is a transitive dependency of sentence-transformers.
+# For CUDA on the basement server, install torch separately first:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
 
 [tool.setuptools.packages.find]
 where = ["src"]

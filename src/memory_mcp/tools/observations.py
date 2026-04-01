@@ -3,6 +3,7 @@
 import asyncpg
 
 from memory_mcp.db import get_pool, resolve_workspace_id
+from memory_mcp.embeddings import delete_observation_embeddings, embed_observations
 
 
 async def _get_node_id(
@@ -48,9 +49,13 @@ async def add_observations(
                 INSERT INTO observations (node_id, ordinal, content)
                 SELECT $1, $2 + gs, unnest
                 FROM unnest($3::text[]) WITH ORDINALITY AS t(unnest, gs)
-                RETURNING ordinal, content
+                RETURNING id, ordinal, content
                 """,
                 node_id, current_max, contents,
+            )
+
+            await embed_observations(
+                conn, node_id, workspace_id, [r["id"] for r in rows]
             )
 
             await conn.execute(
@@ -93,12 +98,14 @@ async def replace_observation(
             UPDATE observations
             SET content = $3
             WHERE node_id = $1 AND ordinal = $2
-            RETURNING ordinal, content AS new_content
+            RETURNING id, ordinal, content AS new_content
             """,
             node_id, ordinal, new_content,
         )
         if row is None:
             raise ValueError(f"Observation at ordinal {ordinal} not found on '{entity_name}'")
+
+        await embed_observations(conn, node_id, workspace_id, [row["id"]])
 
         await conn.execute(
             "INSERT INTO events (node_id, workspace_id, operation) VALUES ($1, $2, 'replace_observation')",
@@ -149,10 +156,16 @@ async def delete_observations(
             not_found_ordinals = [o for o in ordinals if o not in existing_set]
 
             if to_delete:
+                obs_id_rows = await conn.fetch(
+                    "SELECT id FROM observations WHERE node_id = $1 AND ordinal = ANY($2)",
+                    node_id, to_delete,
+                )
+                obs_ids_to_delete = [r["id"] for r in obs_id_rows]
                 await conn.execute(
                     "DELETE FROM observations WHERE node_id = $1 AND ordinal = ANY($2)",
                     node_id, to_delete,
                 )
+                await delete_observation_embeddings(conn, node_id, workspace_id, obs_ids_to_delete)
 
             results.append({
                 "entity_name": entity_name,
