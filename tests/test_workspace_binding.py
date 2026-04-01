@@ -1,5 +1,7 @@
 """Tests for workspace binding via X-Memory-Workspace."""
 
+import inspect
+
 import pytest
 import pytest_asyncio
 from starlette.applications import Starlette
@@ -7,9 +9,11 @@ from starlette.middleware import Middleware
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
+from memory_mcp import mcp_tools
 from memory_mcp.config import settings
 from memory_mcp.db import resolve_effective_workspace_name
 from memory_mcp.server import RequireWorkspaceHeaderMiddleware
+from memory_mcp.tools import consolidation
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -119,3 +123,82 @@ async def test_workspace_header_allows_request():
 
     assert status == 200
     assert body == b"ok"
+
+
+def test_mcp_wrappers_do_not_expose_workspace():
+    wrappers = [
+        mcp_tools.create_entities,
+        mcp_tools.delete_entities,
+        mcp_tools.open_nodes,
+        mcp_tools.get_nodes_by_type,
+        mcp_tools.get_recently_modified,
+        mcp_tools.set_summary,
+        mcp_tools.set_tags,
+        mcp_tools.add_observations,
+        mcp_tools.replace_observation,
+        mcp_tools.delete_observations,
+        mcp_tools.query_observations,
+        mcp_tools.create_relations,
+        mcp_tools.delete_relations,
+        mcp_tools.update_relation_type,
+        mcp_tools.get_relations_between,
+        mcp_tools.get_neighborhood,
+        mcp_tools.get_path,
+        mcp_tools.get_orphans,
+        mcp_tools.get_relation_gaps,
+        mcp_tools.find_similar_nodes,
+        mcp_tools.search_nodes,
+        mcp_tools.get_consolidation_report,
+        mcp_tools.get_pending_consolidation,
+        mcp_tools.get_stats,
+    ]
+
+    for wrapper in wrappers:
+        assert "workspace" not in inspect.signature(wrapper).parameters
+
+
+@pytest.mark.asyncio
+async def test_get_stats_returns_effective_workspace(monkeypatch):
+    class FakeConn:
+        async def fetchrow(self, _query, _workspace_id):
+            return {
+                "node_count": 0,
+                "observation_count": 0,
+                "relation_count": 0,
+                "embedding_coverage": None,
+            }
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_resolve_workspace_id(_conn, workspace):
+        assert workspace == "james/gpt"
+        return 7
+
+    monkeypatch.setattr(
+        "memory_mcp.tools.consolidation.resolve_effective_workspace_name",
+        lambda workspace: "james/gpt",
+    )
+    monkeypatch.setattr(
+        "memory_mcp.tools.consolidation.resolve_workspace_id",
+        fake_resolve_workspace_id,
+    )
+    monkeypatch.setattr(
+        "memory_mcp.tools.consolidation.get_pool",
+        fake_get_pool,
+    )
+
+    result = await consolidation.get_stats()
+
+    assert result["workspace"] == "james/gpt"

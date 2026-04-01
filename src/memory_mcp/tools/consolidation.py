@@ -1,6 +1,10 @@
 """Consolidation and stats tools."""
 
-from memory_mcp.db import get_pool, resolve_workspace_id
+from memory_mcp.db import (
+    get_pool,
+    resolve_effective_workspace_name,
+    resolve_workspace_id,
+)
 
 
 async def get_consolidation_report(
@@ -194,9 +198,10 @@ async def get_stats(
     Returns {node_count, observation_count, relation_count, embedding_coverage, workspace}.
     """
     pool = await get_pool()
+    effective_workspace = resolve_effective_workspace_name(workspace)
 
     async with pool.acquire() as conn:
-        workspace_id = await resolve_workspace_id(conn, workspace)
+        workspace_id = await resolve_workspace_id(conn, effective_workspace)
 
         row = await conn.fetchrow(
             """
@@ -236,5 +241,5 @@ async def get_stats(
         "observation_count": row["observation_count"],
         "relation_count": row["relation_count"],
         "embedding_coverage": float(row["embedding_coverage"]) if row["embedding_coverage"] is not None else None,
-        "workspace": workspace,
+        "workspace": effective_workspace,
     }
