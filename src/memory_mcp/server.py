@@ -1,5 +1,6 @@
 """Memory MCP server entry point."""
 
+import copy
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
@@ -145,11 +146,18 @@ def build_app() -> Starlette:
 
 
 def main() -> None:
+    log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
+    log_config["loggers"]["memory_mcp"] = {
+        "handlers": ["default"],
+        "level": "INFO",
+        "propagate": False,
+    }
     uvicorn.run(
         build_app(),
         host="0.0.0.0",
         port=settings.mcp_port,
         lifespan="on",
+        log_config=log_config,
     )
 
 

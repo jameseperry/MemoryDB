@@ -157,6 +157,27 @@ def test_mcp_wrappers_do_not_expose_workspace():
         assert "workspace" not in inspect.signature(wrapper).parameters
 
 
+def test_mcp_wrapper_logs_tool_workspace_and_session(monkeypatch, caplog):
+    class FakeContext:
+        session_id = "session-123"
+
+    monkeypatch.setattr(
+        "memory_mcp.mcp_tools.resolve_effective_workspace_name",
+        lambda workspace: "james/gpt",
+    )
+    monkeypatch.setattr(
+        "memory_mcp.mcp_tools.get_context",
+        lambda: FakeContext(),
+    )
+
+    with caplog.at_level("INFO"):
+        mcp_tools._log_tool_call("get_stats")
+
+    assert "tool=get_stats" in caplog.text
+    assert "workspace=james/gpt" in caplog.text
+    assert "session_id=session-123" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_get_stats_returns_effective_workspace(monkeypatch):
     class FakeConn:
