@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 
 import asyncpg
 
+from memory_mcp.config import settings
+
 logger = logging.getLogger(__name__)
 
 _model = None  # SentenceTransformer instance, loaded lazily at first use
@@ -26,9 +28,9 @@ def get_model():
     global _model
     if _model is None:
         from sentence_transformers import SentenceTransformer
-        logger.info("Loading nomic-embed-text-v1.5...")
+        logger.info("Loading embed model %s...", settings.embed_model_name)
         _model = SentenceTransformer(
-            "nomic-ai/nomic-embed-text-v1.5",
+            settings.embed_model_name,
             trust_remote_code=True,
         )
         logger.info("Model loaded.")

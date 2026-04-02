@@ -12,6 +12,7 @@ from starlette.routing import Route
 from memory_mcp import mcp_tools
 from memory_mcp.config import settings
 from memory_mcp.db import resolve_effective_workspace_name
+from memory_common.server_host import _drop_duplicate_response_start
 from memory_mcp.server import RequireWorkspaceHeaderMiddleware
 from memory_mcp.tools import consolidation
 
@@ -223,3 +224,23 @@ async def test_get_stats_returns_effective_workspace(monkeypatch):
     result = await consolidation.get_stats()
 
     assert result["workspace"] == "james/gpt"
+
+
+@pytest.mark.asyncio
+async def test_drop_duplicate_response_start_suppresses_sse_teardown_tail():
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    guarded_send = _drop_duplicate_response_start(send)
+
+    await guarded_send({"type": "http.response.start", "status": 200, "headers": []})
+    await guarded_send({"type": "http.response.body", "body": b"chunk", "more_body": True})
+    await guarded_send({"type": "http.response.start", "status": 200, "headers": []})
+    await guarded_send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    assert sent == [
+        {"type": "http.response.start", "status": 200, "headers": []},
+        {"type": "http.response.body", "body": b"chunk", "more_body": True},
+    ]

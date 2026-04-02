@@ -6,8 +6,7 @@ class Settings(BaseSettings):
 
     async_database_url: str = "postgresql://memory:memory@localhost:5432/memory"
     database_url: str = "postgresql+psycopg2://memory:memory@localhost:5432/memory"
-    ollama_url: str = "http://localhost:11434"
-    ollama_embed_model: str = "nomic-embed-text"
+    embed_model_name: str = "nomic-ai/nomic-embed-text-v1.5"
     mcp_port: int = 8765
     mcp_workspace_header: str = "X-Memory-Workspace"
 

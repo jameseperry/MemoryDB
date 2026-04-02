@@ -500,7 +500,7 @@ returns:
   }
 ```
 
-#### `update_belief(understanding_id, new_content, new_summary, subject_names?, reason?)`
+#### `update_understanding(understanding_id, new_content, new_summary, subject_names?, reason?)`
 Revise a consolidated understanding. Writes a new understanding that supersedes the old one, inheriting `kind` and subject tags from the old understanding unless explicitly overridden. `new_summary` is required — the backend does not generate summaries automatically.
 
 ```
@@ -804,7 +804,7 @@ Until available: `bring_to_mind` serves as the explicit approximation. Call it r
 4. `recall()` — question and subject-name modes
 5. `bring_to_mind()` — compaction token, seen filtering, time-gap heuristic
 6. `create_understanding()` — single-subject and intersection understandings
-7. `update_belief()` — supersession chain
+7. `update_understanding()` — supersession chain
 8. `open_around()` + `open_intersection()` — neighborhood and intersection drill-down
 9. `mark_useful()` / `mark_questionable()` + utility_signals table
 10. Retrieval bias — understanding preference in `search()`

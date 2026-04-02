@@ -21,10 +21,21 @@ until docker compose exec -T postgres pg_isready -U memory -q; do
 done
 echo "    Postgres is ready."
 
+echo "==> Ensuring v3 database exists..."
+if ! docker compose exec -T postgres \
+    psql -U memory -tAc "SELECT 1 FROM pg_database WHERE datname = 'memory_v3'" \
+    | grep -q 1; then
+    docker compose exec -T postgres psql -U memory -c "CREATE DATABASE memory_v3"
+fi
+
 # --- Run migrations ---
 echo "==> Running migrations..."
 DATABASE_URL="${DATABASE_URL:-postgresql+psycopg2://memory:memory@localhost:5432/memory}" \
     .venv/bin/alembic upgrade head
+
+echo "==> Running v3 migrations..."
+DATABASE_URL_V3="${DATABASE_URL_V3:-postgresql+psycopg2://memory:memory@localhost:5432/memory_v3}" \
+    .venv/bin/alembic -c alembic_v3.ini upgrade head
 
 # --- Start the MCP server ---
 echo "==> Starting memory MCP server on port ${MCP_PORT:-8765}..."
