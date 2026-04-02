@@ -140,7 +140,11 @@ async def test_v3_workspace_admin_crud_with_fake_pool(monkeypatch):
     async def fake_get_pool_delete():
         return _FakePool(_FakeConn(deleted=True))
 
+    async def fake_reset_workspace(name: str):
+        return {"name": name}
+
     monkeypatch.setattr("memory_v3.admin.get_pool", fake_get_pool_delete)
+    monkeypatch.setattr("memory_v3.admin.reset_workspace", fake_reset_workspace)
     deleted = await delete_workspace("beta")
     assert deleted == {"name": "beta", "deleted": True}
 

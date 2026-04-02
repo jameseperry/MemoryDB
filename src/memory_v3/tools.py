@@ -523,7 +523,6 @@ async def create_subjects(
             )
             results.append(
                 {
-                    "id": row["id"],
                     "name": row["name"],
                     "created_at": row["created_at"].isoformat(),
                 }
@@ -2051,11 +2050,38 @@ async def _mark_signal(
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
         target_kind = await conn.fetchval(
-            "SELECT kind FROM id_registry WHERE id = $1",
+            """
+            SELECT ir.kind
+            FROM id_registry ir
+            WHERE ir.id = $1
+              AND (
+                  (
+                      ir.kind = 'observation'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM observations o
+                          WHERE o.id = ir.id
+                            AND o.workspace_id = $2
+                      )
+                  ) OR (
+                      ir.kind = 'understanding'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM understandings u
+                          WHERE u.id = ir.id
+                            AND u.workspace_id = $2
+                            AND u.superseded_by IS NULL
+                      )
+                  )
+              )
+            """,
             id,
+            workspace_id,
         )
         if target_kind not in {"observation", "understanding"}:
-            raise ValueError(f"ID {id} is not an observation or understanding")
+            raise ValueError(
+                f"ID {id} is not an active observation or understanding in this workspace"
+            )
 
         row = await conn.fetchrow(
             """

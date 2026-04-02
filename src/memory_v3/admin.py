@@ -332,6 +332,11 @@ async def create_workspace(name: str) -> dict:
 async def delete_workspace(name: str) -> dict:
     """Delete a v3 workspace and report whether it existed."""
     name = _normalize_workspace_name(name)
+    try:
+        await reset_workspace(name)
+    except ValueError:
+        return {"name": name, "deleted": False}
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -538,23 +543,16 @@ async def reset_workspace(name: str) -> dict:
                     "DELETE FROM events WHERE id = ANY($1)",
                     ids["event_ids"],
                 )
-            cleanup_ids = (
-                ids["subject_ids"]
-                + ids["observation_ids"]
-                + ids["understanding_ids"]
-                + ids["perspective_ids"]
-                + ids["utility_signal_ids"]
-                + ids["event_ids"]
-            )
+            registry_ids = ids["observation_ids"] + ids["understanding_ids"]
             if ids["observation_ids"] or ids["understanding_ids"]:
                 await conn.execute(
                     "DELETE FROM embeddings WHERE target_id = ANY($1)",
                     ids["observation_ids"] + ids["understanding_ids"],
                 )
-            if cleanup_ids:
+            if registry_ids:
                 await conn.execute(
                     "DELETE FROM id_registry WHERE id = ANY($1)",
-                    cleanup_ids,
+                    registry_ids,
                 )
 
     return {
@@ -1364,7 +1362,7 @@ async def show_subject(workspace: str, name: str) -> dict:
 
 
 async def delete_subject(workspace: str, name: str) -> dict:
-    """Delete one subject by name and remove its id_registry row."""
+    """Delete one subject by name."""
     workspace = _normalize_workspace_name(workspace)
     name = _normalize_subject_name(name)
     pool = await get_pool()
@@ -1380,8 +1378,6 @@ async def delete_subject(workspace: str, name: str) -> dict:
             workspace_id,
             name,
         )
-        if row is not None:
-            await _cleanup_target_metadata(conn, row["id"])
     return {"name": name, "deleted": row is not None}
 
 
