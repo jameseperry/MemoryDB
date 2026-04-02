@@ -334,7 +334,10 @@ def test_v3_cli_subject_list_text(monkeypatch, capsys):
     exit_code = main(["subject", "list", "alpha", "--limit", "2"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out.strip() == "11 James :: human"
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines[0] == "id  name   summary  single_subject_understanding_id"
+    assert lines[1] == "--  -----  -------  -------------------------------"
+    assert lines[2] == "11  James  human"
 
 
 def test_v3_cli_observation_create_json(monkeypatch, capsys):

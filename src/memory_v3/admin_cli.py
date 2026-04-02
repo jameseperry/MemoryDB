@@ -57,45 +57,58 @@ def _emit_result(result, as_json: bool) -> None:
 
 
 def _emit_text_result(result: Any) -> None:
-    if isinstance(result, list):
-        for item in result:
-            if isinstance(item, dict):
-                click.echo(_format_item(item))
-            else:
-                click.echo(str(item))
-        return
     if isinstance(result, dict):
-        click.echo(_format_item(result))
+        _emit_table(["field", "value"], [[key, value] for key, value in result.items()])
+        return
+    if isinstance(result, list):
+        if not result:
+            return
+        if all(isinstance(item, dict) for item in result):
+            headers = _collect_headers(result)
+            rows = [[item.get(header) for header in headers] for item in result]
+            _emit_table(headers, rows)
+            return
+        _emit_table(["value"], [[item] for item in result])
         return
     click.echo(str(result))
 
 
-def _format_item(item: dict) -> str:
-    if "subject_names" in item and "content" in item and "summary" in item and "kind" in item:
-        subjects = ", ".join(item.get("subject_names", [])) or "-"
-        return f"{item['id']} [{item.get('kind') or '-'}] {subjects} :: {item['summary']}"
-    if "subject_names" in item and "content" in item:
-        subjects = ", ".join(item.get("subject_names", [])) or "-"
-        return f"{item['id']} [{item.get('kind') or '-'}] {subjects} :: {item['content']}"
-    if "name" in item and "summary" in item and "single_subject_understanding_id" in item:
-        return f"{item['id']} {item['name']} :: {item.get('summary') or ''}".rstrip()
-    if "operation" in item and "timestamp" in item:
-        return f"{item['timestamp']} [{item.get('session_id') or '-'}] {item['operation']} {item.get('detail')}"
-    if "signal_type" in item and "target_id" in item:
-        return (
-            f"{item['id']} {item['signal_type']} {item.get('target_kind') or '-'} "
-            f"{item['target_id']} :: {item.get('reason') or ''}"
-        ).rstrip()
-    if "instruction" in item and "is_default" in item and "name" in item:
-        scope = "global" if item.get("workspace_id") is None else f"workspace:{item['workspace_id']}"
-        return f"{item['id']} {item['name']} [{scope}] default={item['is_default']}"
-    if "deleted" in item and "name" in item:
-        return f"deleted {item['name']}" if item["deleted"] else f"not found {item['name']}"
-    if "deleted" in item and "id" in item:
-        return f"deleted {item['id']}" if item["deleted"] else f"not found {item['id']}"
-    if "name" in item and set(item) == {"name", "created_at"}:
-        return item["name"]
-    return json.dumps(item, default=_json_default)
+def _collect_headers(items: list[dict]) -> list[str]:
+    headers: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        for key in item:
+            if key not in seen:
+                seen.add(key)
+                headers.append(key)
+    return headers
+
+
+def _format_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, list):
+        return ", ".join(_format_cell(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, default=_json_default)
+    return str(value)
+
+
+def _emit_table(headers: list[str], rows: list[list[Any]]) -> None:
+    formatted_rows = [[_format_cell(value) for value in row] for row in rows]
+    widths = [
+        max(
+            len(header),
+            *(len(row[index]) for row in formatted_rows),
+        )
+        for index, header in enumerate(headers)
+    ]
+    click.echo("  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+    click.echo("  ".join("-" * width for width in widths))
+    for row in formatted_rows:
+        click.echo("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
 
 
 def _run_admin_call(coro):
@@ -133,15 +146,8 @@ def workspace_list(ctx: click.Context) -> None:
 @click.argument("name")
 @click.pass_context
 def workspace_create(ctx: click.Context, name: str) -> None:
-    as_json = ctx.find_root().obj["as_json"]
     result = _run_admin_call(create_workspace(name))
-    if as_json:
-        _emit_result(result, as_json=True)
-        return
-    if result["created"]:
-        click.echo(f"created workspace: {result['name']}")
-    else:
-        click.echo(f"workspace already exists: {result['name']}")
+    _emit_result(result, ctx.find_root().obj["as_json"])
 
 
 def _delete_workspace_command(ctx: click.Context, name: str) -> None:
@@ -192,7 +198,6 @@ def workspace_set_documents(
     protocol_id: int | None,
     orientation_id: int | None,
 ) -> None:
-    as_json = ctx.find_root().obj["as_json"]
     result = _run_admin_call(
         set_workspace_document_ids(
             name,
@@ -201,16 +206,7 @@ def workspace_set_documents(
             orientation_id=orientation_id,
         )
     )
-    if as_json:
-        _emit_result(result, as_json=True)
-        return
-    click.echo(
-        "updated workspace documents for "
-        f"{result['name']}: "
-        f"soul={result['soul_understanding_id']}, "
-        f"protocol={result['protocol_understanding_id']}, "
-        f"orientation={result['orientation_understanding_id']}"
-    )
+    _emit_result(result, ctx.find_root().obj["as_json"])
 
 
 @cli.group()
