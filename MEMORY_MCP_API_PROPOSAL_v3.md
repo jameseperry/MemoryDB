@@ -1,6 +1,6 @@
 # Memory MCP API — Subject/Venn Model (v3)
 *April 1, 2026 — Supersedes v2.2*
-*Synthesized from Claude Sonet, Claude Opus, GPT-5.4, and James across multiple iterations*
+*Synthesized from Claude Sonnet, Claude Opus, GPT-5.4, and James across multiple iterations*
 
 ---
 
