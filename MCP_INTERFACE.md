@@ -3,9 +3,13 @@
 ## Architecture
 
 FastMCP server (Python, Linux) backed by Postgres + pgvector + Ollama.
-Exposes tools over SSE transport for remote access by Claude clients.
+Exposes tools over both Streamable HTTP and SSE transports.
 
 No separate gateway layer — FastMCP handles the MCP protocol directly.
+
+Endpoints:
+- Streamable HTTP: `/mcp` (for Codex and other streamable-http clients)
+- SSE: `/sse` with message POSTs under `/sse/messages/` (for Claude-style SSE clients)
 
 ---
 
@@ -14,7 +18,8 @@ No separate gateway layer — FastMCP handles the MCP protocol directly.
 - **Node**: named entity with a type, optional summary, optional tags, and an ordered list of observations.
 - **Observation**: a string fact attached to a node, with a stable per-node ordinal. Reads always return in ordinal order.
 - **Relation**: directed, typed edge between two nodes (`from_node` → `to_node` with a `relation_type` string).
-- **Workspace**: namespace for all data. `workspace_id` is on every table; nullable = default workspace. Enables per-user or shared spaces.
+- **Workspace**: namespace for all memory data. Nodes, relations, and events belong to an explicit named workspace; there is no implicit default workspace.
+- **Workspace Binding**: HTTP MCP clients must send `X-Memory-Workspace` on the SSE connection request and MCP message requests. The server uses that header as the effective workspace for the connection, and the workspace must already exist. MCP tools do not expose a `workspace` argument.
 - **Embedding**: each observation is embedded from multiple perspectives (general, technical, relational, temporal, project). Search runs across all perspectives automatically.
 
 ---
@@ -35,7 +40,6 @@ params:
     summary: str | None
     tags: list[str]            # optional
   }
-  workspace: str | None        # defaults to default workspace
 
 returns:
   list of { name, entity_type, created_at }
@@ -51,7 +55,6 @@ Delete nodes by name, including all their observations, relations, embeddings, a
 ```
 params:
   entity_names: list[str]
-  workspace: str | None
 
 returns:
   { deleted: list[str], not_found: list[str] }
@@ -67,7 +70,6 @@ Retrieve full node content by name, including all observations (ordered by ordin
 ```
 params:
   names: list[str]
-  workspace: str | None
 
 returns:
   {
@@ -92,7 +94,6 @@ List all nodes of a given entity type.
 ```
 params:
   entity_type: str
-  workspace: str | None
 
 returns:
   list of { name, entity_type, summary, tags, updated_at }
@@ -109,7 +110,6 @@ Return nodes modified in the last N days, ordered by `updated_at` descending.
 params:
   days: int = 7
   limit: int = 20
-  workspace: str | None
 
 returns:
   list of { name, entity_type, summary, updated_at }
@@ -126,7 +126,6 @@ Set or replace the summary field on a node.
 params:
   name: str
   summary: str
-  workspace: str | None
 
 returns:
   { name, summary, updated_at }
@@ -141,7 +140,6 @@ Replace the tag set on a node.
 params:
   name: str
   tags: list[str]
-  workspace: str | None
 
 returns:
   { name, tags }
@@ -162,7 +160,6 @@ params:
     entity_name: str
     contents: list[str]    # appended in order, ordinals assigned sequentially
   }
-  workspace: str | None
 
 returns:
   list of {
@@ -184,7 +181,6 @@ params:
   entity_name: str
   ordinal: int
   new_content: str
-  workspace: str | None
 
 returns:
   { entity_name, ordinal, old_content: str, new_content: str }
@@ -203,7 +199,6 @@ params:
     entity_name: str
     ordinals: list[int]
   }
-  workspace: str | None
 
 returns:
   list of { entity_name, deleted_ordinals: list[int], not_found_ordinals: list[int] }
@@ -221,7 +216,6 @@ params:
   entity_name: str
   query: str
   mode: "embedding" | "text" = "embedding"
-  workspace: str | None
 
 returns:
   list of { ordinal: int, content: str, score: float }
@@ -246,7 +240,6 @@ params:
     to_entity: str
     relation_type: str
   }
-  workspace: str | None
 
 returns:
   { created: list[relation], already_existed: list[relation], not_found: list[str] }
@@ -266,7 +259,6 @@ params:
     to_entity: str
     relation_type: str
   }
-  workspace: str | None
 
 returns:
   { deleted: int, not_found: int }
@@ -283,7 +275,6 @@ params:
   to_entity: str
   old_type: str
   new_type: str
-  workspace: str | None
 
 returns:
   { from_entity, to_entity, old_type, new_type }
@@ -298,7 +289,6 @@ Return all relations between two specific nodes (both directions).
 params:
   entity_a: str
   entity_b: str
-  workspace: str | None
 
 returns:
   list of { from: str, to: str, relation_type: str }
@@ -315,7 +305,6 @@ Return a node and all nodes within N hops, with the subgraph of relations betwee
 params:
   name: str
   depth: int = 1             # number of hops
-  workspace: str | None
 
 returns:
   {
@@ -335,7 +324,6 @@ Find the shortest relation path between two nodes.
 params:
   from_entity: str
   to_entity: str
-  workspace: str | None
 
 returns:
   {
@@ -353,9 +341,6 @@ Schema needs: recursive CTE with path tracking.
 Return nodes with no relations.
 
 ```
-params:
-  workspace: str | None
-
 returns:
   list of { name, entity_type, summary, updated_at }
 ```
@@ -367,9 +352,6 @@ Return nodes that have observations referencing other node names but no formal r
 (Useful for finding implicit connections that should be explicit.)
 
 ```
-params:
-  workspace: str | None
-
 returns:
   list of { node: str, referenced_name: str, reference_count: int }
 ```
@@ -387,7 +369,6 @@ Useful during consolidation to surface candidates for explicit relations, merges
 
 ```
 params:
-  workspace: str | None
   limit: int = 20              # top N most similar unrelated pairs
   min_score: float = 0.75      # cosine similarity threshold
 
@@ -423,7 +404,6 @@ params:
   query: str
   limit: int = 10
   mode: "embedding" | "text" = "embedding"
-  workspace: str | None
 
 returns:
   list of {
@@ -451,9 +431,6 @@ Returns a structured report identifying areas where the graph needs attention.
 Backend provides computational candidates; Claude applies judgment.
 
 ```
-params:
-  workspace: str | None
-
 returns:
   {
     stale_summaries: list of {
@@ -493,9 +470,6 @@ Lightweight version of consolidation report — just the nodes that haven't been
 or haven't had their summary updated since their last observation was added.
 
 ```
-params:
-  workspace: str | None
-
 returns:
   list of { name, entity_type, observation_count, last_observation_at, summary_updated_at | None }
 ```
@@ -506,16 +480,13 @@ returns:
 Summary statistics about the workspace.
 
 ```
-params:
-  workspace: str | None
-
 returns:
   {
     node_count: int
     observation_count: int
     relation_count: int
     embedding_coverage: float      # fraction of observations with embeddings
-    workspace: str | None
+    workspace: str
   }
 ```
 
