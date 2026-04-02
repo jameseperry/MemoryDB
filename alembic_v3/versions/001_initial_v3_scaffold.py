@@ -44,6 +44,20 @@ def upgrade() -> None:
 
     op.execute(
         """
+        CREATE TABLE sessions (
+            session_id     BIGSERIAL PRIMARY KEY,
+            workspace_id   INT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            session_token  TEXT NOT NULL,
+            seen_set_token INT NOT NULL DEFAULT 0,
+            updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            model_tier     TEXT,
+            UNIQUE (workspace_id, session_token)
+        )
+        """
+    )
+
+    op.execute(
+        """
         CREATE TABLE subjects (
             id                              BIGSERIAL PRIMARY KEY,
             workspace_id                    INT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -67,7 +81,7 @@ def upgrade() -> None:
             summary        TEXT,
             kind           TEXT NOT NULL,
             generation     INT NOT NULL,
-            session_id     TEXT,
+            session_id     BIGINT REFERENCES sessions(session_id) ON DELETE SET NULL,
             model_tier     TEXT,
             reason         TEXT,
             content_tsv    TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
@@ -110,7 +124,7 @@ def upgrade() -> None:
             confidence   DOUBLE PRECISION,
             generation   INT NOT NULL,
             observed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            session_id   TEXT,
+            session_id   BIGINT REFERENCES sessions(session_id) ON DELETE SET NULL,
             model_tier   TEXT,
             content_tsv  TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
             created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -156,7 +170,7 @@ def upgrade() -> None:
             target_id   BIGINT NOT NULL,
             signal_type TEXT NOT NULL,
             reason      TEXT,
-            session_id  TEXT,
+            session_id  BIGINT REFERENCES sessions(session_id) ON DELETE SET NULL,
             created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """
@@ -220,7 +234,7 @@ def upgrade() -> None:
         CREATE TABLE events (
             id           BIGSERIAL PRIMARY KEY,
             workspace_id INT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-            session_id   TEXT,
+            session_id   BIGINT REFERENCES sessions(session_id) ON DELETE SET NULL,
             timestamp    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             operation    TEXT NOT NULL,
             detail       JSONB
@@ -230,19 +244,8 @@ def upgrade() -> None:
 
     op.execute(
         """
-        CREATE TABLE sessions (
-            session_id    TEXT PRIMARY KEY,
-            current_token INT NOT NULL,
-            updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            model_tier    TEXT
-        )
-        """
-    )
-
-    op.execute(
-        """
         CREATE TABLE surfaced_in_session (
-            session_id  TEXT NOT NULL,
+            session_id  BIGINT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
             id          BIGINT NOT NULL,
             surfaced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (session_id, id)

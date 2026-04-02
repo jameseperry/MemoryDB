@@ -139,16 +139,42 @@ async def record_event(
     detail: dict[str, Any] | None = None,
 ) -> None:
     """Append a structured event row."""
+    event_session_id = await resolve_session_id(
+        conn,
+        workspace_id=workspace_id,
+        session_token=session_id,
+    )
     await conn.execute(
         """
         INSERT INTO events (workspace_id, session_id, operation, detail)
         VALUES ($1, $2, $3, $4::jsonb)
         """,
         workspace_id,
-        session_id,
+        event_session_id,
         operation,
         json.dumps(detail) if detail is not None else None,
     )
+
+
+async def resolve_session_id(
+    conn: asyncpg.Connection,
+    *,
+    workspace_id: int,
+    session_token: str,
+) -> int:
+    """Resolve a transport session token to the workspace-local session row ID."""
+    row = await conn.fetchrow(
+        """
+        INSERT INTO sessions (workspace_id, session_token, updated_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (workspace_id, session_token)
+            DO UPDATE SET updated_at = NOW()
+        RETURNING session_id
+        """,
+        workspace_id,
+        session_token,
+    )
+    return row["session_id"]
 
 
 def serialize(row: asyncpg.Record | dict | None) -> dict | None:

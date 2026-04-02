@@ -118,10 +118,11 @@ async def search_embeddings(
                     o.content AS matched_content,
                     o.generation,
                     o.created_at,
-                    o.session_id,
+                    s.session_token AS session_id,
                     o.model_tier,
                     NULL::text AS summary
                 FROM observations o
+                LEFT JOIN sessions s ON s.session_id = o.session_id
                 WHERE o.workspace_id = $1
 
                 UNION ALL
@@ -132,10 +133,11 @@ async def search_embeddings(
                     u.content AS matched_content,
                     u.generation,
                     u.created_at,
-                    u.session_id,
+                    s.session_token AS session_id,
                     u.model_tier,
                     u.summary
                 FROM understandings u
+                LEFT JOIN sessions s ON s.session_id = u.session_id
                 WHERE u.workspace_id = $1
                   AND u.superseded_by IS NULL
             )

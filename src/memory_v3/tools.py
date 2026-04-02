@@ -14,6 +14,7 @@ from memory_v3.db import (
     record_event,
     resolve_effective_workspace_name,
     resolve_optional_session_id,
+    resolve_session_id,
     resolve_workspace_id,
 )
 from memory_v3.embeddings import embed_targets, search_embeddings
@@ -140,11 +141,17 @@ def _split_target_ids(items: list[dict]) -> tuple[list[int], list[int]]:
 async def _mark_targets_surfaced(
     conn: asyncpg.Connection,
     *,
+    workspace_id: int,
     session_id: str,
     target_ids: list[int],
 ) -> None:
     if not target_ids:
         return
+    session_row_id = await resolve_session_id(
+        conn,
+        workspace_id=workspace_id,
+        session_token=session_id,
+    )
     await conn.executemany(
         """
         INSERT INTO surfaced_in_session (session_id, id)
@@ -152,23 +159,25 @@ async def _mark_targets_surfaced(
         ON CONFLICT (session_id, id)
             DO UPDATE SET surfaced_at = NOW()
         """,
-        [(session_id, target_id) for target_id in target_ids],
+        [(session_row_id, target_id) for target_id in target_ids],
     )
 
 
 async def _advance_heartbeat_token(
     conn: asyncpg.Connection,
     *,
+    workspace_id: int,
     session_id: str,
 ) -> int:
     token = secrets.randbelow(2_147_483_647) + 1
     await conn.execute(
         """
-        INSERT INTO sessions (session_id, current_token, updated_at)
-        VALUES ($1, $2, NOW())
-        ON CONFLICT (session_id)
-            DO UPDATE SET current_token = EXCLUDED.current_token, updated_at = NOW()
+        INSERT INTO sessions (workspace_id, session_token, seen_set_token, updated_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (workspace_id, session_token)
+            DO UPDATE SET seen_set_token = EXCLUDED.seen_set_token, updated_at = NOW()
         """,
+        workspace_id,
         session_id,
         token,
     )
@@ -185,19 +194,21 @@ def _normalize_model_tier(model_tier: str | None) -> str | None:
 async def _set_session_model_tier(
     conn: asyncpg.Connection,
     *,
+    workspace_id: int,
     session_id: str,
     model_tier: str | None,
 ) -> str | None:
     row = await conn.fetchrow(
         """
-        INSERT INTO sessions (session_id, current_token, updated_at, model_tier)
-        VALUES ($1, 0, NOW(), $2)
-        ON CONFLICT (session_id)
+        INSERT INTO sessions (workspace_id, session_token, seen_set_token, updated_at, model_tier)
+        VALUES ($1, $2, 0, NOW(), $3)
+        ON CONFLICT (workspace_id, session_token)
             DO UPDATE SET
                 model_tier = EXCLUDED.model_tier,
                 updated_at = NOW()
         RETURNING model_tier
         """,
+        workspace_id,
         session_id,
         _normalize_model_tier(model_tier),
     )
@@ -206,10 +217,17 @@ async def _set_session_model_tier(
 
 async def _get_session_model_tier(
     conn: asyncpg.Connection,
+    workspace_id: int,
     session_id: str,
 ) -> str | None:
     return await conn.fetchval(
-        "SELECT model_tier FROM sessions WHERE session_id = $1",
+        """
+        SELECT model_tier
+        FROM sessions
+        WHERE workspace_id = $1
+          AND session_token = $2
+        """,
+        workspace_id,
         session_id,
     )
 
@@ -411,6 +429,11 @@ async def _create_understanding_record(
     reason: str | None = None,
     model_tier: str | None = None,
 ) -> dict:
+    session_row_id = await resolve_session_id(
+        conn,
+        workspace_id=workspace_id,
+        session_token=session_id,
+    )
     subject_ids = [row["id"] for row in subject_rows]
     previous_ids = await _find_active_understanding_exact_subjects(
         conn,
@@ -433,7 +456,7 @@ async def _create_understanding_record(
         summary,
         kind,
         generation,
-        session_id,
+        session_row_id,
         model_tier,
         reason,
     )
@@ -719,7 +742,16 @@ async def set_structural_understanding(
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
-        model_tier = await _get_session_model_tier(conn, session_id)
+        session_row_id = await resolve_session_id(
+            conn,
+            workspace_id=workspace_id,
+            session_token=effective_session_id,
+        )
+        model_tier = await _get_session_model_tier(
+            conn,
+            workspace_id,
+            session_id,
+        )
         subject_rows = await _require_subjects(conn, workspace_id, [subject_name])
         generation = await get_workspace_generation(conn, workspace_id)
         understanding = await _create_understanding_record(
@@ -786,7 +818,16 @@ async def add_observations(
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
-        model_tier = await _get_session_model_tier(conn, effective_session_id)
+        session_row_id = await resolve_session_id(
+            conn,
+            workspace_id=workspace_id,
+            session_token=effective_session_id,
+        )
+        model_tier = await _get_session_model_tier(
+            conn,
+            workspace_id,
+            effective_session_id,
+        )
         generation = await get_workspace_generation(conn, workspace_id)
         results = []
 
@@ -843,7 +884,7 @@ async def add_observations(
                     item.get("confidence"),
                     generation,
                     item.get("observed_at"),
-                    effective_session_id,
+                    session_row_id,
                     model_tier,
                 )
                 await embed_targets(
@@ -902,10 +943,11 @@ async def delete_observations(
         workspace_id = await resolve_workspace_id(conn, workspace)
         rows = await conn.fetch(
             """
-            SELECT id, session_id
-            FROM observations
-            WHERE workspace_id = $1
-              AND id = ANY($2)
+            SELECT o.id, s.session_token AS session_id
+            FROM observations o
+            LEFT JOIN sessions s ON s.session_id = o.session_id
+            WHERE o.workspace_id = $1
+              AND o.id = ANY($2)
             """,
             workspace_id,
             ids,
@@ -1033,7 +1075,11 @@ async def create_understanding(
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
-        model_tier = await _get_session_model_tier(conn, effective_session_id)
+        model_tier = await _get_session_model_tier(
+            conn,
+            workspace_id,
+            effective_session_id,
+        )
         subject_rows = await _require_subjects(conn, workspace_id, subject_names)
         generation = await get_workspace_generation(conn, workspace_id)
         effective_kind = kind or ("single_subject" if len(subject_rows) == 1 else "relationship")
@@ -1205,7 +1251,11 @@ async def update_understanding(
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
-        model_tier = await _get_session_model_tier(conn, effective_session_id)
+        model_tier = await _get_session_model_tier(
+            conn,
+            workspace_id,
+            effective_session_id,
+        )
         old_row = await conn.fetchrow(
             """
             SELECT id, kind, superseded_by
@@ -1259,7 +1309,7 @@ async def update_understanding(
             new_summary,
             old_row["kind"],
             generation,
-            effective_session_id,
+            session_row_id,
             model_tier,
             reason,
         )
@@ -1325,7 +1375,7 @@ async def _search_text(
                 o.content AS matched_content,
                 o.generation,
                 o.created_at,
-                o.session_id,
+                s.session_token AS session_id,
                 o.model_tier,
                 ts_rank(o.content_tsv, plainto_tsquery('english', $2), 1)
                     + CASE
@@ -1335,6 +1385,7 @@ async def _search_text(
                       END
                     AS score
             FROM observations o
+            LEFT JOIN sessions s ON s.session_id = o.session_id
             WHERE o.workspace_id = $1
               AND o.content_tsv @@ plainto_tsquery('english', $2)
 
@@ -1347,10 +1398,11 @@ async def _search_text(
                 u.content AS matched_content,
                 u.generation,
                 u.created_at,
-                u.session_id,
+                s.session_token AS session_id,
                 u.model_tier,
                 ts_rank(u.content_tsv, plainto_tsquery('english', $2), 1) * $6::double precision AS score
             FROM understandings u
+            LEFT JOIN sessions s ON s.session_id = u.session_id
             WHERE u.workspace_id = $1
               AND u.superseded_by IS NULL
               AND u.content_tsv @@ plainto_tsquery('english', $2)
@@ -1496,6 +1548,7 @@ async def recall(
                 target_ids.append(structural_understanding["id"])
             await _mark_targets_surfaced(
                 conn,
+                workspace_id=workspace_id,
                 session_id=effective_session_id,
                 target_ids=target_ids,
             )
@@ -1553,6 +1606,7 @@ async def recall(
             workspace_id = await resolve_workspace_id(conn, workspace)
             await _mark_targets_surfaced(
                 conn,
+                workspace_id=workspace_id,
                 session_id=effective_session_id,
                 target_ids=[item["id"] for item in search_results],
             )
@@ -1626,11 +1680,21 @@ async def orient(
         workspace_id = workspace_row["id"]
         await _set_session_model_tier(
             conn,
+            workspace_id=workspace_id,
             session_id=effective_session_id,
             model_tier=model_tier,
         )
         await conn.execute(
-            "DELETE FROM surfaced_in_session WHERE session_id = $1",
+            """
+            DELETE FROM surfaced_in_session
+            WHERE session_id = (
+                SELECT session_id
+                FROM sessions
+                WHERE workspace_id = $1
+                  AND session_token = $2
+            )
+            """,
+            workspace_id,
             effective_session_id,
         )
 
@@ -1766,6 +1830,7 @@ async def set_session_model_tier(
         workspace_id = await resolve_workspace_id(conn, workspace)
         stored_model_tier = await _set_session_model_tier(
             conn,
+            workspace_id=workspace_id,
             session_id=effective_session_id,
             model_tier=model_tier,
         )
@@ -1854,9 +1919,15 @@ async def reset_seen(
         deleted_rows = await conn.fetch(
             """
             DELETE FROM surfaced_in_session
-            WHERE session_id = $1
+            WHERE session_id = (
+                SELECT session_id
+                FROM sessions
+                WHERE workspace_id = $1
+                  AND session_token = $2
+            )
             RETURNING id
             """,
+            workspace_id,
             effective_session_id,
         )
         await record_event(
@@ -1886,16 +1957,18 @@ async def bring_to_mind(
         workspace_id = await resolve_workspace_id(conn, workspace_name)
         session_row = await conn.fetchrow(
             """
-            SELECT current_token, updated_at
+            SELECT seen_set_token, updated_at
             FROM sessions
-            WHERE session_id = $1
+            WHERE workspace_id = $1
+              AND session_token = $2
             """,
+            workspace_id,
             effective_session_id,
         )
 
         compaction_detected = False
         if session_row is not None:
-            if last_token is None or session_row["current_token"] != last_token:
+            if last_token is None or session_row["seen_set_token"] != last_token:
                 compaction_detected = True
             elif (
                 session_row["updated_at"] is not None
@@ -1911,14 +1984,33 @@ async def bring_to_mind(
 
         if compaction_detected:
             await conn.execute(
-                "DELETE FROM surfaced_in_session WHERE session_id = $1",
+                """
+                DELETE FROM surfaced_in_session
+                WHERE session_id = (
+                    SELECT session_id
+                    FROM sessions
+                    WHERE workspace_id = $1
+                      AND session_token = $2
+                )
+                """,
+                workspace_id,
                 effective_session_id,
             )
 
         seen_ids: set[int] = set()
         if not include_seen and not compaction_detected:
             rows = await conn.fetch(
-                "SELECT id FROM surfaced_in_session WHERE session_id = $1",
+                """
+                SELECT id
+                FROM surfaced_in_session
+                WHERE session_id = (
+                    SELECT session_id
+                    FROM sessions
+                    WHERE workspace_id = $1
+                      AND session_token = $2
+                )
+                """,
+                workspace_id,
                 effective_session_id,
             )
             seen_ids = {row["id"] for row in rows}
@@ -1936,11 +2028,13 @@ async def bring_to_mind(
         workspace_id = await resolve_workspace_id(conn, workspace_name)
         await _mark_targets_surfaced(
             conn,
+            workspace_id=workspace_id,
             session_id=effective_session_id,
             target_ids=[item["id"] for item in filtered_results],
         )
         heartbeat_token = await _advance_heartbeat_token(
             conn,
+            workspace_id=workspace_id,
             session_id=effective_session_id,
         )
         await record_event(
@@ -2049,6 +2143,11 @@ async def _mark_signal(
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
+        session_row_id = await resolve_session_id(
+            conn,
+            workspace_id=workspace_id,
+            session_token=effective_session_id,
+        )
         target_kind = await conn.fetchval(
             """
             SELECT ir.kind
@@ -2092,7 +2191,7 @@ async def _mark_signal(
             id,
             signal_type,
             reason,
-            effective_session_id,
+            session_row_id,
         )
         await record_event(
             conn,

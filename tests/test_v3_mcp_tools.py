@@ -163,6 +163,11 @@ async def test_v3_record_event_serializes_detail_json():
     captured = {}
 
     class FakeConn:
+        async def fetchrow(self, query, *args):
+            assert "INSERT INTO sessions" in query
+            assert args == (7, "conversation-42")
+            return {"session_id": 99}
+
         async def execute(self, query, *args):
             captured["query"] = query
             captured["args"] = args
@@ -178,7 +183,7 @@ async def test_v3_record_event_serializes_detail_json():
     assert "INSERT INTO events" in captured["query"]
     assert captured["args"] == (
         7,
-        "conversation-42",
+        99,
         "orient",
         json.dumps({"session_reset": True}),
     )
@@ -190,9 +195,12 @@ async def test_v3_bring_to_mind_idle_gap_query_uses_typed_interval(monkeypatch):
 
     class FakeConn:
         async def fetchrow(self, query, *args):
+            if "INSERT INTO sessions" in query:
+                assert args == (7, "conversation-42")
+                return {"session_id": 99}
             if "FROM sessions" in query:
                 return {
-                    "current_token": 123,
+                    "seen_set_token": 123,
                     "updated_at": datetime(2026, 4, 2, tzinfo=timezone.utc),
                 }
             raise AssertionError(query)
@@ -204,7 +212,8 @@ async def test_v3_bring_to_mind_idle_gap_query_uses_typed_interval(monkeypatch):
             raise AssertionError(query)
 
         async def fetch(self, query, *args):
-            if "SELECT id FROM surfaced_in_session" in query:
+            if "FROM surfaced_in_session" in query:
+                assert args == (7, "conversation-42")
                 return []
             raise AssertionError(query)
 
@@ -296,9 +305,12 @@ async def test_v3_set_session_model_tier_tool_stores_nullable_model_tier(monkeyp
             raise AssertionError(query)
 
         async def fetchrow(self, query, *args):
-            if "INSERT INTO sessions" in query:
+            if "RETURNING model_tier" in query:
                 captured["session_args"] = args
                 return {"model_tier": "claude-opus-4.1"}
+            if "RETURNING session_id" in query:
+                assert args == (7, "conversation-42")
+                return {"session_id": 99}
             raise AssertionError(query)
 
         async def execute(self, query, *args):
@@ -341,10 +353,10 @@ async def test_v3_set_session_model_tier_tool_stores_nullable_model_tier(monkeyp
         "session_id": "conversation-42",
         "model_tier": "claude-opus-4.1",
     }
-    assert captured["session_args"] == ("conversation-42", "claude-opus-4.1")
+    assert captured["session_args"] == (7, "conversation-42", "claude-opus-4.1")
     assert captured["event_args"] == (
         7,
-        "conversation-42",
+        99,
         "set_session_model_tier",
         json.dumps({"model_tier": "claude-opus-4.1"}),
     )
@@ -356,6 +368,9 @@ async def test_v3_add_observations_uses_session_model_tier(monkeypatch):
 
     class FakeConn:
         async def fetchrow(self, query, *args):
+            if "INSERT INTO sessions" in query:
+                assert args == (7, "conversation-42")
+                return {"session_id": 99}
             if "SELECT id, content" in query and "FROM observations" in query:
                 return None
             if "INSERT INTO observations" in query:
@@ -395,7 +410,8 @@ async def test_v3_add_observations_uses_session_model_tier(monkeypatch):
         assert workspace_id == 7
         return 3
 
-    async def fake_get_session_model_tier(_conn, session_id):
+    async def fake_get_session_model_tier(_conn, workspace_id, session_id):
+        assert workspace_id == 7
         assert session_id == "conversation-42"
         return "gpt-5.4"
 
@@ -450,7 +466,7 @@ async def test_v3_add_observations_uses_session_model_tier(monkeypatch):
             "subjects_created": [],
         }
     ]
-    assert captured["insert_args"][-2:] == ("conversation-42", "gpt-5.4")
+    assert captured["insert_args"][-2:] == (99, "gpt-5.4")
     assert captured["subject_links"] == [(77, 101)]
 
 
@@ -770,7 +786,8 @@ async def test_v3_recall_question_mode_returns_best_answer_provenance(monkeypatc
             }
         ]
 
-    async def fake_mark_targets_surfaced(_conn, *, session_id, target_ids):
+    async def fake_mark_targets_surfaced(_conn, *, workspace_id, session_id, target_ids):
+        assert workspace_id == 7
         assert session_id == "conversation-42"
         assert target_ids == [47]
 
@@ -884,7 +901,8 @@ async def test_v3_update_understanding_wrapper_uses_new_api(monkeypatch):
 async def test_v3_update_understanding_rejects_superseded_understanding(monkeypatch):
     class FakeConn:
         async def fetchval(self, query, *args):
-            if "SELECT model_tier FROM sessions" in query:
+            if "SELECT model_tier" in query and "FROM sessions" in query:
+                assert args == (7, "conversation-42")
                 return None
             raise AssertionError(query)
 
@@ -1120,6 +1138,9 @@ async def test_v3_set_workspace_documents_validates_active_understandings(monkey
                     "protocol_understanding_id": 12,
                     "orientation_understanding_id": None,
                 }
+            if "INSERT INTO sessions" in query:
+                assert args == (7, "conversation-42")
+                return {"session_id": 99}
             raise AssertionError(query)
 
         async def execute(self, query, *args):
@@ -1164,7 +1185,7 @@ async def test_v3_set_workspace_documents_validates_active_understandings(monkey
     assert captured["update_args"] == (7, 11, 12)
     assert captured["event_args"] == (
         7,
-        "conversation-42",
+        99,
         "set_workspace_documents",
         json.dumps(
             {

@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from memory_v3 import tools
 from memory_v3.config import settings
-from memory_v3.db import get_pool, serialize
+from memory_v3.db import get_pool, resolve_session_id, serialize
 from memory_v3.embeddings import embed_targets
 
 
@@ -612,19 +612,20 @@ async def export_workspace(name: str, path: str | Path) -> dict:
             for row in await conn.fetch(
                 """
                 SELECT
-                    id,
-                    content,
-                    content_hash,
-                    kind,
-                    confidence,
-                    generation,
-                    observed_at,
-                    session_id,
-                    model_tier,
-                    created_at
-                FROM observations
-                WHERE workspace_id = $1
-                ORDER BY id
+                    o.id,
+                    o.content,
+                    o.content_hash,
+                    o.kind,
+                    o.confidence,
+                    o.generation,
+                    o.observed_at,
+                    s.session_token AS session_id,
+                    o.model_tier,
+                    o.created_at
+                FROM observations o
+                LEFT JOIN sessions s ON s.session_id = o.session_id
+                WHERE o.workspace_id = $1
+                ORDER BY o.id
                 """,
                 workspace_id,
             )
@@ -634,19 +635,20 @@ async def export_workspace(name: str, path: str | Path) -> dict:
             for row in await conn.fetch(
                 """
                 SELECT
-                    id,
-                    content,
-                    summary,
-                    kind,
-                    generation,
-                    session_id,
-                    model_tier,
-                    reason,
-                    created_at,
-                    superseded_by
-                FROM understandings
-                WHERE workspace_id = $1
-                ORDER BY id
+                    u.id,
+                    u.content,
+                    u.summary,
+                    u.kind,
+                    u.generation,
+                    s.session_token AS session_id,
+                    u.model_tier,
+                    u.reason,
+                    u.created_at,
+                    u.superseded_by
+                FROM understandings u
+                LEFT JOIN sessions s ON s.session_id = u.session_id
+                WHERE u.workspace_id = $1
+                ORDER BY u.id
                 """,
                 workspace_id,
             )
@@ -711,10 +713,17 @@ async def export_workspace(name: str, path: str | Path) -> dict:
                 serialize(row)
                 for row in await conn.fetch(
                     """
-                    SELECT id, target_id, signal_type, reason, session_id, created_at
-                    FROM utility_signals
-                    WHERE target_id = ANY($1)
-                    ORDER BY id
+                    SELECT
+                        us.id,
+                        us.target_id,
+                        us.signal_type,
+                        us.reason,
+                        s.session_token AS session_id,
+                        us.created_at
+                    FROM utility_signals us
+                    LEFT JOIN sessions s ON s.session_id = us.session_id
+                    WHERE us.target_id = ANY($1)
+                    ORDER BY us.id
                     """,
                     target_ids,
                 )
@@ -723,10 +732,16 @@ async def export_workspace(name: str, path: str | Path) -> dict:
             serialize(row)
             for row in await conn.fetch(
                 """
-                SELECT id, session_id, timestamp, operation, detail
-                FROM events
-                WHERE workspace_id = $1
-                ORDER BY id
+                SELECT
+                    e.id,
+                    s.session_token AS session_id,
+                    e.timestamp,
+                    e.operation,
+                    e.detail
+                FROM events e
+                LEFT JOIN sessions s ON s.session_id = e.session_id
+                WHERE e.workspace_id = $1
+                ORDER BY e.id
                 """,
                 workspace_id,
             )
@@ -871,6 +886,13 @@ async def import_workspace(
                 _emit_import_progress(progress, "perspectives")
 
             for observation in observations:
+                observation_session_id = None
+                if observation.get("session_id") is not None:
+                    observation_session_id = await resolve_session_id(
+                        conn,
+                        workspace_id=workspace_id,
+                        session_token=observation["session_id"],
+                    )
                 row = await conn.fetchrow(
                     """
                     INSERT INTO observations (
@@ -900,7 +922,7 @@ async def import_workspace(
                     observation.get("confidence"),
                     observation["generation"],
                     _parse_timestamp(observation.get("observed_at")),
-                    observation.get("session_id"),
+                    observation_session_id,
                     observation.get("model_tier"),
                     _parse_timestamp(observation.get("created_at")),
                 )
@@ -908,6 +930,13 @@ async def import_workspace(
                 _emit_import_progress(progress, "observations")
 
             for understanding in understandings:
+                understanding_session_id = None
+                if understanding.get("session_id") is not None:
+                    understanding_session_id = await resolve_session_id(
+                        conn,
+                        workspace_id=workspace_id,
+                        session_token=understanding["session_id"],
+                    )
                 row = await conn.fetchrow(
                     """
                     INSERT INTO understandings (
@@ -932,7 +961,7 @@ async def import_workspace(
                     understanding.get("summary"),
                     understanding["kind"],
                     understanding["generation"],
-                    understanding.get("session_id"),
+                    understanding_session_id,
                     understanding.get("model_tier"),
                     understanding.get("reason"),
                     _parse_timestamp(understanding.get("created_at")),
@@ -1071,6 +1100,25 @@ async def import_workspace(
             _emit_import_progress(progress, "workspace_documents")
 
             if payload.get("utility_signals"):
+                utility_signal_rows = []
+                for item in payload["utility_signals"]:
+                    signal_session_id = None
+                    if item.get("session_id") is not None:
+                        signal_session_id = await resolve_session_id(
+                            conn,
+                            workspace_id=workspace_id,
+                            session_token=item["session_id"],
+                        )
+                    utility_signal_rows.append(
+                        (
+                            observation_id_map.get(item["target_id"])
+                            or understanding_id_map[item["target_id"]],
+                            item["signal_type"],
+                            item.get("reason"),
+                            signal_session_id,
+                            _parse_timestamp(item.get("created_at")),
+                        )
+                    )
                 await conn.executemany(
                     """
                     INSERT INTO utility_signals (
@@ -1085,17 +1133,7 @@ async def import_workspace(
                         COALESCE($5::timestamptz, NOW())
                     )
                     """,
-                    [
-                        (
-                            observation_id_map.get(item["target_id"])
-                            or understanding_id_map[item["target_id"]],
-                            item["signal_type"],
-                            item.get("reason"),
-                            item.get("session_id"),
-                            _parse_timestamp(item.get("created_at")),
-                        )
-                        for item in payload["utility_signals"]
-                    ],
+                    utility_signal_rows,
                 )
                 _emit_import_progress(
                     progress,
@@ -1104,6 +1142,13 @@ async def import_workspace(
                 )
 
             for event in payload.get("events", []):
+                event_session_id = None
+                if event.get("session_id") is not None:
+                    event_session_id = await resolve_session_id(
+                        conn,
+                        workspace_id=workspace_id,
+                        session_token=event["session_id"],
+                    )
                 await conn.execute(
                     """
                     INSERT INTO events (
@@ -1121,7 +1166,7 @@ async def import_workspace(
                     )
                     """,
                     workspace_id,
-                    event.get("session_id"),
+                    event_session_id,
                     _parse_timestamp(event.get("timestamp")),
                     event["operation"],
                     json.dumps(event.get("detail")) if event.get("detail") is not None else None,
@@ -1402,10 +1447,11 @@ async def list_observations(
                 o.confidence,
                 o.generation,
                 o.observed_at,
-                o.session_id,
+                sess.session_token AS session_id,
                 o.model_tier,
                 o.created_at
             FROM observations o
+            LEFT JOIN sessions sess ON sess.session_id = o.session_id
             LEFT JOIN observation_subjects os ON os.observation_id = o.id
             LEFT JOIN subjects s ON s.id = os.subject_id
             WHERE o.workspace_id = $1
@@ -1464,19 +1510,20 @@ async def show_observation(workspace: str, observation_id: int) -> dict:
         row = await conn.fetchrow(
             """
             SELECT
-                id,
-                content,
-                content_hash,
-                kind,
-                confidence,
-                generation,
-                observed_at,
-                session_id,
-                model_tier,
-                created_at
-            FROM observations
-            WHERE workspace_id = $1
-              AND id = $2
+                o.id,
+                o.content,
+                o.content_hash,
+                o.kind,
+                o.confidence,
+                o.generation,
+                o.observed_at,
+                s.session_token AS session_id,
+                o.model_tier,
+                o.created_at
+            FROM observations o
+            LEFT JOIN sessions s ON s.session_id = o.session_id
+            WHERE o.workspace_id = $1
+              AND o.id = $2
             """,
             workspace_id,
             observation_id,
@@ -1544,12 +1591,13 @@ async def list_understandings(
                 u.kind,
                 u.summary,
                 u.generation,
-                u.session_id,
+                sess.session_token AS session_id,
                 u.model_tier,
                 u.reason,
                 u.created_at,
                 u.superseded_by
             FROM understandings u
+            LEFT JOIN sessions sess ON sess.session_id = u.session_id
             LEFT JOIN understanding_subjects us ON us.understanding_id = u.id
             LEFT JOIN subjects s ON s.id = us.subject_id
             WHERE u.workspace_id = $1
@@ -1609,19 +1657,20 @@ async def show_understanding(workspace: str, understanding_id: int) -> dict:
         row = await conn.fetchrow(
             """
             SELECT
-                id,
-                content,
-                summary,
-                kind,
-                generation,
-                session_id,
-                model_tier,
-                reason,
-                created_at,
-                superseded_by
-            FROM understandings
-            WHERE workspace_id = $1
-              AND id = $2
+                u.id,
+                u.content,
+                u.summary,
+                u.kind,
+                u.generation,
+                s.session_token AS session_id,
+                u.model_tier,
+                u.reason,
+                u.created_at,
+                u.superseded_by
+            FROM understandings u
+            LEFT JOIN sessions s ON s.session_id = u.session_id
+            WHERE u.workspace_id = $1
+              AND u.id = $2
             """,
             workspace_id,
             understanding_id,
@@ -1716,9 +1765,10 @@ async def list_utility_signals(workspace: str, limit: int = 100) -> list[dict]:
                 ir.kind AS target_kind,
                 us.signal_type,
                 us.reason,
-                us.session_id,
+                s.session_token AS session_id,
                 us.created_at
             FROM utility_signals us
+            LEFT JOIN sessions s ON s.session_id = us.session_id
             JOIN id_registry ir ON ir.id = us.target_id
             WHERE EXISTS (
                 SELECT 1 FROM observations o WHERE o.id = us.target_id AND o.workspace_id = $1
@@ -1742,10 +1792,16 @@ async def list_events(workspace: str, limit: int = 100) -> list[dict]:
         workspace_id = await _get_workspace_id(conn, workspace)
         rows = await conn.fetch(
             """
-            SELECT id, session_id, timestamp, operation, detail
-            FROM events
-            WHERE workspace_id = $1
-            ORDER BY timestamp DESC
+            SELECT
+                e.id,
+                s.session_token AS session_id,
+                e.timestamp,
+                e.operation,
+                e.detail
+            FROM events e
+            LEFT JOIN sessions s ON s.session_id = e.session_id
+            WHERE e.workspace_id = $1
+            ORDER BY e.timestamp DESC
             LIMIT $2
             """,
             workspace_id,
