@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlsplit
+
 from memory_v3 import tools
+from memory_v3.config import settings
 from memory_v3.db import get_pool, serialize
+from memory_v3.embeddings import embed_targets
 
 
 def _normalize_workspace_name(name: str) -> str:
@@ -24,6 +34,106 @@ def _normalize_object_id(object_id: int) -> int:
     if object_id <= 0:
         raise ValueError("ID must be a positive integer")
     return object_id
+
+
+def _normalize_file_path(path: str | Path) -> Path:
+    file_path = Path(path).expanduser()
+    if not file_path.name:
+        raise ValueError("File path is required")
+    return file_path
+
+
+def _json_default(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _parse_timestamp(value) -> datetime | None:
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    raise TypeError(
+        f"Expected ISO timestamp string or datetime, got {type(value).__name__}"
+    )
+
+
+def _emit_import_progress(
+    progress: Callable[[str, int], None] | None,
+    label: str,
+    advance: int = 1,
+) -> None:
+    if progress is not None:
+        progress(label, advance)
+
+
+def _database_parts() -> tuple[str, str]:
+    parsed = urlsplit(settings.async_database_url)
+    user = parsed.username
+    database = parsed.path.lstrip("/")
+    if not user:
+        raise ValueError("Database user is missing from ASYNC_DATABASE_URL_V3")
+    if not database:
+        raise ValueError("Database name is missing from ASYNC_DATABASE_URL_V3")
+    return user, database
+
+
+def _local_database_url() -> str:
+    return settings.async_database_url.replace("postgresql+psycopg2://", "postgresql://")
+
+
+def _resolve_database_method(method: str, *, required_local_tools: tuple[str, ...]) -> str:
+    if method not in {"auto", "local", "docker"}:
+        raise ValueError(f"Unsupported method: {method}")
+
+    if method in {"auto", "local"}:
+        if all(shutil.which(tool) for tool in required_local_tools):
+            return "local"
+        if method == "local":
+            missing = ", ".join(
+                tool for tool in required_local_tools if not shutil.which(tool)
+            )
+            raise RuntimeError(f"Missing required local PostgreSQL tools: {missing}")
+
+    if method in {"auto", "docker"}:
+        if shutil.which("docker"):
+            return "docker"
+        raise RuntimeError(
+            "Docker is required for backup/restore when local PostgreSQL tools are unavailable"
+        )
+
+    raise RuntimeError("No supported backup/restore method is available")
+
+
+def _run_database_subprocess(
+    command: list[str],
+    *,
+    output_path: Path | None = None,
+    input_path: Path | None = None,
+) -> None:
+    kwargs: dict = {"stderr": subprocess.PIPE}
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("wb") as handle:
+            kwargs["stdout"] = handle
+            try:
+                subprocess.run(command, check=True, **kwargs)
+            except subprocess.CalledProcessError as exc:
+                detail = exc.stderr.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(detail or "Backup command failed") from exc
+        return
+    if input_path is not None:
+        with input_path.open("rb") as handle:
+            kwargs["stdin"] = handle
+            kwargs["stdout"] = subprocess.DEVNULL
+            try:
+                subprocess.run(command, check=True, **kwargs)
+            except subprocess.CalledProcessError as exc:
+                detail = exc.stderr.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(detail or "Restore command failed") from exc
+        return
+    raise ValueError("Either output_path or input_path must be provided")
 
 
 async def _get_workspace_id(conn, workspace: str) -> int:
@@ -78,6 +188,97 @@ async def _subject_names_for_understandings(conn, understanding_ids: list[int]) 
     for row in rows:
         names_by_id.setdefault(row["understanding_id"], []).append(row["name"])
     return names_by_id
+
+
+def backup_database(path: str | Path, method: str = "auto") -> dict:
+    """Back up the v3 database to a plain SQL file."""
+    backup_path = _normalize_file_path(path)
+    user, database = _database_parts()
+    resolved_method = _resolve_database_method(
+        method,
+        required_local_tools=("pg_dump",),
+    )
+
+    if resolved_method == "local":
+        command = [
+            "pg_dump",
+            f"--dbname={_local_database_url()}",
+            "--format=plain",
+            "--clean",
+            "--if-exists",
+            "--no-owner",
+            "--no-privileges",
+        ]
+    else:
+        command = [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "postgres",
+            "pg_dump",
+            "-U",
+            user,
+            "-d",
+            database,
+            "--format=plain",
+            "--clean",
+            "--if-exists",
+            "--no-owner",
+            "--no-privileges",
+        ]
+
+    _run_database_subprocess(command, output_path=backup_path)
+    return {
+        "path": str(backup_path.resolve()),
+        "method": resolved_method,
+        "database": database,
+    }
+
+
+def restore_database(path: str | Path, method: str = "auto") -> dict:
+    """Restore the v3 database from a plain SQL backup file."""
+    backup_path = _normalize_file_path(path)
+    if not backup_path.is_file():
+        raise ValueError(f"Backup file not found: {backup_path}")
+
+    user, database = _database_parts()
+    resolved_method = _resolve_database_method(
+        method,
+        required_local_tools=("psql",),
+    )
+
+    if resolved_method == "local":
+        command = [
+            "psql",
+            f"--dbname={_local_database_url()}",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-1",
+        ]
+    else:
+        command = [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "postgres",
+            "psql",
+            "-U",
+            user,
+            "-d",
+            database,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-1",
+        ]
+
+    _run_database_subprocess(command, input_path=backup_path)
+    return {
+        "path": str(backup_path.resolve()),
+        "method": resolved_method,
+        "database": database,
+    }
 
 
 async def list_workspaces() -> list[dict]:
@@ -211,6 +412,862 @@ async def set_workspace_document_ids(
         )
 
     return serialize(row)
+
+
+async def _collect_workspace_ids(conn, workspace_id: int) -> dict[str, list[int]]:
+    subject_rows = await conn.fetch(
+        "SELECT id FROM subjects WHERE workspace_id = $1 ORDER BY id",
+        workspace_id,
+    )
+    observation_rows = await conn.fetch(
+        "SELECT id FROM observations WHERE workspace_id = $1 ORDER BY id",
+        workspace_id,
+    )
+    understanding_rows = await conn.fetch(
+        "SELECT id FROM understandings WHERE workspace_id = $1 ORDER BY id",
+        workspace_id,
+    )
+    perspective_rows = await conn.fetch(
+        "SELECT id FROM perspectives WHERE workspace_id = $1 ORDER BY id",
+        workspace_id,
+    )
+    target_ids = [row["id"] for row in observation_rows] + [
+        row["id"] for row in understanding_rows
+    ]
+    utility_signal_rows = []
+    surfaced_rows = []
+    if target_ids:
+        utility_signal_rows = await conn.fetch(
+            "SELECT id FROM utility_signals WHERE target_id = ANY($1) ORDER BY id",
+            target_ids,
+        )
+        surfaced_rows = await conn.fetch(
+            "SELECT DISTINCT id FROM surfaced_in_session WHERE id = ANY($1) ORDER BY id",
+            target_ids,
+        )
+    event_rows = await conn.fetch(
+        "SELECT id FROM events WHERE workspace_id = $1 ORDER BY id",
+        workspace_id,
+    )
+    return {
+        "subject_ids": [row["id"] for row in subject_rows],
+        "observation_ids": [row["id"] for row in observation_rows],
+        "understanding_ids": [row["id"] for row in understanding_rows],
+        "perspective_ids": [row["id"] for row in perspective_rows],
+        "utility_signal_ids": [row["id"] for row in utility_signal_rows],
+        "surfaced_ids": [row["id"] for row in surfaced_rows],
+        "event_ids": [row["id"] for row in event_rows],
+    }
+
+
+async def reset_workspace(name: str) -> dict:
+    """Delete all v3 data in a workspace while preserving the workspace row."""
+    name = _normalize_workspace_name(name)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            workspace_id = await _get_workspace_id(conn, name)
+            ids = await _collect_workspace_ids(conn, workspace_id)
+
+            await conn.execute(
+                """
+                UPDATE workspaces
+                SET
+                    soul_understanding_id = NULL,
+                    protocol_understanding_id = NULL,
+                    orientation_understanding_id = NULL,
+                    current_generation = 0,
+                    last_consolidated_at = NULL
+                WHERE id = $1
+                """,
+                workspace_id,
+            )
+            await conn.execute(
+                """
+                UPDATE subjects
+                SET
+                    single_subject_understanding_id = NULL,
+                    structural_understanding_id = NULL
+                WHERE workspace_id = $1
+                """,
+                workspace_id,
+            )
+            await conn.execute(
+                """
+                UPDATE understandings
+                SET superseded_by = NULL
+                WHERE workspace_id = $1
+                """,
+                workspace_id,
+            )
+            if ids["surfaced_ids"]:
+                await conn.execute(
+                    """
+                    DELETE FROM surfaced_in_session
+                    WHERE id = ANY($1)
+                    """,
+                    ids["surfaced_ids"],
+                )
+            if ids["utility_signal_ids"]:
+                await conn.execute(
+                    "DELETE FROM utility_signals WHERE id = ANY($1)",
+                    ids["utility_signal_ids"],
+                )
+            if ids["understanding_ids"]:
+                await conn.execute(
+                    "DELETE FROM understandings WHERE id = ANY($1)",
+                    ids["understanding_ids"],
+                )
+            if ids["observation_ids"]:
+                await conn.execute(
+                    "DELETE FROM observations WHERE id = ANY($1)",
+                    ids["observation_ids"],
+                )
+            if ids["subject_ids"]:
+                await conn.execute(
+                    "DELETE FROM subjects WHERE id = ANY($1)",
+                    ids["subject_ids"],
+                )
+            if ids["perspective_ids"]:
+                await conn.execute(
+                    "DELETE FROM perspectives WHERE id = ANY($1)",
+                    ids["perspective_ids"],
+                )
+            if ids["event_ids"]:
+                await conn.execute(
+                    "DELETE FROM events WHERE id = ANY($1)",
+                    ids["event_ids"],
+                )
+            cleanup_ids = (
+                ids["subject_ids"]
+                + ids["observation_ids"]
+                + ids["understanding_ids"]
+                + ids["perspective_ids"]
+                + ids["utility_signal_ids"]
+                + ids["event_ids"]
+            )
+            if ids["observation_ids"] or ids["understanding_ids"]:
+                await conn.execute(
+                    "DELETE FROM embeddings WHERE target_id = ANY($1)",
+                    ids["observation_ids"] + ids["understanding_ids"],
+                )
+            if cleanup_ids:
+                await conn.execute(
+                    "DELETE FROM id_registry WHERE id = ANY($1)",
+                    cleanup_ids,
+                )
+
+    return {
+        "name": name,
+        "subjects_deleted": len(ids["subject_ids"]),
+        "observations_deleted": len(ids["observation_ids"]),
+        "understandings_deleted": len(ids["understanding_ids"]),
+        "perspectives_deleted": len(ids["perspective_ids"]),
+        "utility_signals_deleted": len(ids["utility_signal_ids"]),
+        "events_deleted": len(ids["event_ids"]),
+    }
+
+
+async def export_workspace(name: str, path: str | Path) -> dict:
+    """Export one workspace to a portable JSON snapshot."""
+    name = _normalize_workspace_name(name)
+    export_path = _normalize_file_path(path)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        workspace_id = await _get_workspace_id(conn, name)
+        workspace_row = await conn.fetchrow(
+            """
+            SELECT
+                name,
+                soul_understanding_id,
+                protocol_understanding_id,
+                orientation_understanding_id,
+                current_generation,
+                last_consolidated_at,
+                created_at
+            FROM workspaces
+            WHERE id = $1
+            """,
+            workspace_id,
+        )
+        subjects = [
+            serialize(row)
+            for row in await conn.fetch(
+                """
+                SELECT
+                    id,
+                    name,
+                    summary,
+                    tags,
+                    created_at,
+                    single_subject_understanding_id,
+                    structural_understanding_id
+                FROM subjects
+                WHERE workspace_id = $1
+                ORDER BY id
+                """,
+                workspace_id,
+            )
+        ]
+        observations = [
+            serialize(row)
+            for row in await conn.fetch(
+                """
+                SELECT
+                    id,
+                    content,
+                    content_hash,
+                    kind,
+                    confidence,
+                    generation,
+                    observed_at,
+                    session_id,
+                    model_tier,
+                    created_at
+                FROM observations
+                WHERE workspace_id = $1
+                ORDER BY id
+                """,
+                workspace_id,
+            )
+        ]
+        understandings = [
+            serialize(row)
+            for row in await conn.fetch(
+                """
+                SELECT
+                    id,
+                    content,
+                    summary,
+                    kind,
+                    generation,
+                    session_id,
+                    model_tier,
+                    reason,
+                    created_at,
+                    superseded_by
+                FROM understandings
+                WHERE workspace_id = $1
+                ORDER BY id
+                """,
+                workspace_id,
+            )
+        ]
+        observation_subjects = [
+            serialize(row)
+            for row in await conn.fetch(
+                """
+                SELECT os.observation_id, os.subject_id
+                FROM observation_subjects os
+                JOIN observations o ON o.id = os.observation_id
+                WHERE o.workspace_id = $1
+                ORDER BY os.observation_id, os.subject_id
+                """,
+                workspace_id,
+            )
+        ]
+        understanding_subjects = [
+            serialize(row)
+            for row in await conn.fetch(
+                """
+                SELECT us.understanding_id, us.subject_id
+                FROM understanding_subjects us
+                JOIN understandings u ON u.id = us.understanding_id
+                WHERE u.workspace_id = $1
+                ORDER BY us.understanding_id, us.subject_id
+                """,
+                workspace_id,
+            )
+        ]
+        understanding_sources = [
+            serialize(row)
+            for row in await conn.fetch(
+                """
+                SELECT src.understanding_id, src.observation_id
+                FROM understanding_sources src
+                JOIN understandings u ON u.id = src.understanding_id
+                WHERE u.workspace_id = $1
+                ORDER BY src.understanding_id, src.observation_id
+                """,
+                workspace_id,
+            )
+        ]
+        perspectives = [
+            serialize(row)
+            for row in await conn.fetch(
+                """
+                SELECT id, name, instruction, is_default
+                FROM perspectives
+                WHERE workspace_id = $1
+                ORDER BY id
+                """,
+                workspace_id,
+            )
+        ]
+        target_ids = [row["id"] for row in observations] + [
+            row["id"] for row in understandings
+        ]
+        utility_signals = []
+        if target_ids:
+            utility_signals = [
+                serialize(row)
+                for row in await conn.fetch(
+                    """
+                    SELECT id, target_id, signal_type, reason, session_id, created_at
+                    FROM utility_signals
+                    WHERE target_id = ANY($1)
+                    ORDER BY id
+                    """,
+                    target_ids,
+                )
+            ]
+        events = [
+            serialize(row)
+            for row in await conn.fetch(
+                """
+                SELECT id, session_id, timestamp, operation, detail
+                FROM events
+                WHERE workspace_id = $1
+                ORDER BY id
+                """,
+                workspace_id,
+            )
+        ]
+
+    payload = {
+        "schema_version": 3,
+        "workspace": serialize(workspace_row),
+        "subjects": subjects,
+        "observations": observations,
+        "understandings": understandings,
+        "observation_subjects": observation_subjects,
+        "understanding_subjects": understanding_subjects,
+        "understanding_sources": understanding_sources,
+        "perspectives": perspectives,
+        "utility_signals": utility_signals,
+        "events": events,
+    }
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    export_path.write_text(
+        json.dumps(payload, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
+    return {
+        "name": name,
+        "path": str(export_path.resolve()),
+        "subjects_exported": len(subjects),
+        "observations_exported": len(observations),
+        "understandings_exported": len(understandings),
+        "perspectives_exported": len(perspectives),
+        "utility_signals_exported": len(utility_signals),
+        "events_exported": len(events),
+    }
+
+
+async def import_workspace(
+    path: str | Path,
+    *,
+    name: str | None = None,
+    progress: Callable[[str, int], None] | None = None,
+) -> dict:
+    """Import a workspace snapshot created by export_workspace."""
+    import_path = _normalize_file_path(path)
+    if not import_path.is_file():
+        raise ValueError(f"Workspace export file not found: {import_path}")
+
+    payload = json.loads(import_path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 3:
+        raise ValueError("Unsupported workspace export schema_version")
+    source_workspace = payload.get("workspace") or {}
+    target_name = _normalize_workspace_name(name or source_workspace.get("name", ""))
+    observations = payload.get("observations", [])
+    understandings = payload.get("understandings", [])
+
+    subject_id_map: dict[int, int] = {}
+    observation_id_map: dict[int, int] = {}
+    understanding_id_map: dict[int, int] = {}
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            workspace_row = await conn.fetchrow(
+                """
+                INSERT INTO workspaces (
+                    name,
+                    current_generation,
+                    last_consolidated_at,
+                    created_at
+                )
+                VALUES ($1, $2, $3, COALESCE($4::timestamptz, NOW()))
+                ON CONFLICT (name) DO UPDATE
+                SET
+                    current_generation = EXCLUDED.current_generation,
+                    last_consolidated_at = EXCLUDED.last_consolidated_at
+                RETURNING id
+                """,
+                target_name,
+                source_workspace.get("current_generation", 0),
+                _parse_timestamp(source_workspace.get("last_consolidated_at")),
+                _parse_timestamp(source_workspace.get("created_at")),
+            )
+            workspace_id = workspace_row["id"]
+            ids = await _collect_workspace_ids(conn, workspace_id)
+            if any(
+                ids[key]
+                for key in [
+                    "subject_ids",
+                    "observation_ids",
+                    "understanding_ids",
+                    "perspective_ids",
+                    "utility_signal_ids",
+                    "event_ids",
+                ]
+            ):
+                raise ValueError(
+                    f"Workspace '{target_name}' is not empty. Reset it before importing."
+                )
+            _emit_import_progress(progress, "workspace")
+
+            for subject in payload.get("subjects", []):
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO subjects (
+                        workspace_id,
+                        name,
+                        summary,
+                        tags,
+                        created_at
+                    )
+                    VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, NOW()))
+                    RETURNING id
+                    """,
+                    workspace_id,
+                    subject["name"],
+                    subject.get("summary"),
+                    subject.get("tags") or [],
+                    _parse_timestamp(subject.get("created_at")),
+                )
+                subject_id_map[subject["id"]] = row["id"]
+                _emit_import_progress(progress, "subjects")
+
+            for perspective in payload.get("perspectives", []):
+                await conn.execute(
+                    """
+                    INSERT INTO perspectives (
+                        workspace_id,
+                        name,
+                        instruction,
+                        is_default
+                    )
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (workspace_id, name) DO UPDATE
+                    SET
+                        instruction = EXCLUDED.instruction,
+                        is_default = EXCLUDED.is_default
+                    """,
+                    workspace_id,
+                    perspective["name"],
+                    perspective["instruction"],
+                    perspective["is_default"],
+                )
+                _emit_import_progress(progress, "perspectives")
+
+            for observation in observations:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO observations (
+                        workspace_id,
+                        content,
+                        content_hash,
+                        kind,
+                        confidence,
+                        generation,
+                        observed_at,
+                        session_id,
+                        model_tier,
+                        created_at
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6,
+                        COALESCE($7::timestamptz, NOW()),
+                        $8, $9,
+                        COALESCE($10::timestamptz, NOW())
+                    )
+                    RETURNING id
+                    """,
+                    workspace_id,
+                    observation["content"],
+                    observation["content_hash"],
+                    observation.get("kind"),
+                    observation.get("confidence"),
+                    observation["generation"],
+                    _parse_timestamp(observation.get("observed_at")),
+                    observation.get("session_id"),
+                    observation.get("model_tier"),
+                    _parse_timestamp(observation.get("created_at")),
+                )
+                observation_id_map[observation["id"]] = row["id"]
+                _emit_import_progress(progress, "observations")
+
+            for understanding in understandings:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO understandings (
+                        workspace_id,
+                        content,
+                        summary,
+                        kind,
+                        generation,
+                        session_id,
+                        model_tier,
+                        reason,
+                        created_at
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8,
+                        COALESCE($9::timestamptz, NOW())
+                    )
+                    RETURNING id
+                    """,
+                    workspace_id,
+                    understanding["content"],
+                    understanding.get("summary"),
+                    understanding["kind"],
+                    understanding["generation"],
+                    understanding.get("session_id"),
+                    understanding.get("model_tier"),
+                    understanding.get("reason"),
+                    _parse_timestamp(understanding.get("created_at")),
+                )
+                understanding_id_map[understanding["id"]] = row["id"]
+                _emit_import_progress(progress, "understandings")
+
+            if payload.get("observation_subjects"):
+                await conn.executemany(
+                    """
+                    INSERT INTO observation_subjects (observation_id, subject_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    [
+                        (
+                            observation_id_map[item["observation_id"]],
+                            subject_id_map[item["subject_id"]],
+                        )
+                        for item in payload["observation_subjects"]
+                    ],
+                )
+                _emit_import_progress(
+                    progress,
+                    "observation_subjects",
+                    len(payload["observation_subjects"]),
+                )
+
+            if payload.get("understanding_subjects"):
+                await conn.executemany(
+                    """
+                    INSERT INTO understanding_subjects (understanding_id, subject_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    [
+                        (
+                            understanding_id_map[item["understanding_id"]],
+                            subject_id_map[item["subject_id"]],
+                        )
+                        for item in payload["understanding_subjects"]
+                    ],
+                )
+                _emit_import_progress(
+                    progress,
+                    "understanding_subjects",
+                    len(payload["understanding_subjects"]),
+                )
+
+            if payload.get("understanding_sources"):
+                await conn.executemany(
+                    """
+                    INSERT INTO understanding_sources (understanding_id, observation_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    [
+                        (
+                            understanding_id_map[item["understanding_id"]],
+                            observation_id_map[item["observation_id"]],
+                        )
+                        for item in payload["understanding_sources"]
+                    ],
+                )
+                _emit_import_progress(
+                    progress,
+                    "understanding_sources",
+                    len(payload["understanding_sources"]),
+                )
+
+            for understanding in understandings:
+                old_superseded_by = understanding.get("superseded_by")
+                if old_superseded_by is not None:
+                    await conn.execute(
+                        """
+                        UPDATE understandings
+                        SET superseded_by = $2
+                        WHERE id = $1
+                        """,
+                        understanding_id_map[understanding["id"]],
+                        understanding_id_map[old_superseded_by],
+                    )
+                _emit_import_progress(progress, "supersession")
+
+            for subject in payload.get("subjects", []):
+                single_id = subject.get("single_subject_understanding_id")
+                structural_id = subject.get("structural_understanding_id")
+                await conn.execute(
+                    """
+                    UPDATE subjects
+                    SET
+                        single_subject_understanding_id = $2,
+                        structural_understanding_id = $3
+                    WHERE id = $1
+                    """,
+                    subject_id_map[subject["id"]],
+                    (
+                        understanding_id_map[single_id]
+                        if single_id is not None
+                        else None
+                    ),
+                    (
+                        understanding_id_map[structural_id]
+                        if structural_id is not None
+                        else None
+                    ),
+                )
+                _emit_import_progress(progress, "subject_pointers")
+
+            await conn.execute(
+                """
+                UPDATE workspaces
+                SET
+                    soul_understanding_id = $2,
+                    protocol_understanding_id = $3,
+                    orientation_understanding_id = $4
+                WHERE id = $1
+                """,
+                workspace_id,
+                (
+                    understanding_id_map[source_workspace["soul_understanding_id"]]
+                    if source_workspace.get("soul_understanding_id") is not None
+                    else None
+                ),
+                (
+                    understanding_id_map[source_workspace["protocol_understanding_id"]]
+                    if source_workspace.get("protocol_understanding_id") is not None
+                    else None
+                ),
+                (
+                    understanding_id_map[source_workspace["orientation_understanding_id"]]
+                    if source_workspace.get("orientation_understanding_id") is not None
+                    else None
+                ),
+            )
+            _emit_import_progress(progress, "workspace_documents")
+
+            if payload.get("utility_signals"):
+                await conn.executemany(
+                    """
+                    INSERT INTO utility_signals (
+                        target_id,
+                        signal_type,
+                        reason,
+                        session_id,
+                        created_at
+                    )
+                    VALUES (
+                        $1, $2, $3, $4,
+                        COALESCE($5::timestamptz, NOW())
+                    )
+                    """,
+                    [
+                        (
+                            observation_id_map.get(item["target_id"])
+                            or understanding_id_map[item["target_id"]],
+                            item["signal_type"],
+                            item.get("reason"),
+                            item.get("session_id"),
+                            _parse_timestamp(item.get("created_at")),
+                        )
+                        for item in payload["utility_signals"]
+                    ],
+                )
+                _emit_import_progress(
+                    progress,
+                    "utility_signals",
+                    len(payload["utility_signals"]),
+                )
+
+            for event in payload.get("events", []):
+                await conn.execute(
+                    """
+                    INSERT INTO events (
+                        workspace_id,
+                        session_id,
+                        timestamp,
+                        operation,
+                        detail
+                    )
+                    VALUES (
+                        $1, $2,
+                        COALESCE($3::timestamptz, NOW()),
+                        $4,
+                        $5::jsonb
+                    )
+                    """,
+                    workspace_id,
+                    event.get("session_id"),
+                    _parse_timestamp(event.get("timestamp")),
+                    event["operation"],
+                    json.dumps(event.get("detail")) if event.get("detail") is not None else None,
+                )
+                _emit_import_progress(progress, "events")
+
+            imported_targets = [
+                (observation_id_map[row["id"]], row["content"])
+                for row in observations
+            ]
+            imported_understandings = [
+                (understanding_id_map[row["id"]], row["content"])
+                for row in understandings
+            ]
+            batch_size = 32
+            for start_index in range(0, len(imported_targets), batch_size):
+                target_batch = imported_targets[start_index : start_index + batch_size]
+                await embed_targets(
+                    conn,
+                    workspace_id=workspace_id,
+                    targets=target_batch,
+                )
+                _emit_import_progress(
+                    progress,
+                    "embedding_observations",
+                    len(target_batch),
+                )
+
+            for start_index in range(0, len(imported_understandings), batch_size):
+                target_batch = imported_understandings[
+                    start_index : start_index + batch_size
+                ]
+                await embed_targets(
+                    conn,
+                    workspace_id=workspace_id,
+                    targets=target_batch,
+                )
+                _emit_import_progress(
+                    progress,
+                    "embedding_understandings",
+                    len(target_batch),
+                )
+
+    return {
+        "name": target_name,
+        "source_name": source_workspace.get("name"),
+        "subjects_imported": len(subject_id_map),
+        "observations_imported": len(observation_id_map),
+        "understandings_imported": len(understanding_id_map),
+        "perspectives_imported": len(payload.get("perspectives", [])),
+        "utility_signals_imported": len(payload.get("utility_signals", [])),
+        "events_imported": len(payload.get("events", [])),
+    }
+
+
+async def count_reembed_targets() -> int:
+    """Return how many objects will be embedded by reembed_database."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM observations)
+                +
+                (
+                    SELECT COUNT(*)
+                    FROM understandings
+                    WHERE superseded_by IS NULL
+                )
+            """
+        )
+
+
+async def reembed_database(
+    *,
+    progress: Callable[[str, int], None] | None = None,
+) -> dict:
+    """Regenerate all observation and active-understanding embeddings."""
+    pool = await get_pool()
+    observations_embedded = 0
+    understandings_embedded = 0
+
+    async with pool.acquire() as conn:
+        workspace_rows = await conn.fetch(
+            """
+            SELECT id, name
+            FROM workspaces
+            ORDER BY name
+            """
+        )
+
+        await conn.execute("DELETE FROM embeddings")
+
+        batch_size = 32
+        for workspace_row in workspace_rows:
+            observation_rows = await conn.fetch(
+                """
+                SELECT id, content
+                FROM observations
+                WHERE workspace_id = $1
+                ORDER BY id
+                """,
+                workspace_row["id"],
+            )
+            understanding_rows = await conn.fetch(
+                """
+                SELECT id, content
+                FROM understandings
+                WHERE workspace_id = $1
+                  AND superseded_by IS NULL
+                ORDER BY id
+                """,
+                workspace_row["id"],
+            )
+            workspace_targets = [
+                (row["id"], row["content"])
+                for row in observation_rows
+            ] + [
+                (row["id"], row["content"])
+                for row in understanding_rows
+            ]
+            for start_index in range(0, len(workspace_targets), batch_size):
+                target_batch = workspace_targets[
+                    start_index : start_index + batch_size
+                ]
+                await embed_targets(
+                    conn,
+                    workspace_id=workspace_row["id"],
+                    targets=target_batch,
+                )
+                _emit_import_progress(
+                    progress,
+                    workspace_row["name"],
+                    len(target_batch),
+                )
+
+            observations_embedded += len(observation_rows)
+            understandings_embedded += len(understanding_rows)
+
+    return {
+        "workspaces_reembedded": len(workspace_rows),
+        "observations_reembedded": observations_embedded,
+        "understandings_reembedded": understandings_embedded,
+    }
 
 
 async def list_subjects(workspace: str, limit: int = 100) -> list[dict]:

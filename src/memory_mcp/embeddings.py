@@ -20,6 +20,9 @@ import asyncpg
 from memory_mcp.config import settings
 
 logger = logging.getLogger(__name__)
+_nomic_bert_logger = logging.getLogger(
+    "transformers_modules.nomic_hyphen_ai.nomic_hyphen_bert_hyphen_2048"
+)
 
 _model = None  # SentenceTransformer instance, loaded lazily at first use
 
@@ -28,6 +31,12 @@ def get_model():
     global _model
     if _model is None:
         from sentence_transformers import SentenceTransformer
+
+        # The remote Nomic model implementation logs successful state-dict loads
+        # at WARNING level, which produces "<All keys matched successfully>" noise.
+        if _nomic_bert_logger.level < logging.ERROR:
+            _nomic_bert_logger.setLevel(logging.ERROR)
+
         logger.info("Loading embed model %s...", settings.embed_model_name)
         _model = SentenceTransformer(
             settings.embed_model_name,

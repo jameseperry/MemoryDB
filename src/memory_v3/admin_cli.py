@@ -12,6 +12,8 @@ from typing import Any
 import click
 
 from memory_v3.admin import (
+    backup_database,
+    count_reembed_targets,
     create_observation,
     create_subject,
     create_understanding,
@@ -20,6 +22,8 @@ from memory_v3.admin import (
     delete_subject,
     delete_understanding,
     delete_workspace,
+    export_workspace,
+    import_workspace,
     list_events,
     list_observations,
     list_perspectives,
@@ -27,6 +31,9 @@ from memory_v3.admin import (
     list_understandings,
     list_utility_signals,
     list_workspaces,
+    reset_workspace,
+    reembed_database,
+    restore_database,
     set_workspace_document_ids,
     show_observation,
     show_subject,
@@ -113,6 +120,14 @@ def _emit_table(headers: list[str], rows: list[list[Any]]) -> None:
 
 def _run_admin_call(coro):
     return asyncio.run(_run_with_pool(coro))
+
+
+def _workspace_import_progress_total(path: str) -> int:
+    with click.open_file(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    observations = payload.get("observations", [])
+    understandings = payload.get("understandings", [])
+    return len(observations) + len(understandings)
 
 
 def _print_and_exit_on_missing(result: dict, as_json: bool) -> None:
@@ -207,6 +222,73 @@ def workspace_set_documents(
         )
     )
     _emit_result(result, ctx.find_root().obj["as_json"])
+
+
+@workspace.command("reset")
+@click.argument("name")
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Skip the destructive reset confirmation prompt.",
+)
+@click.pass_context
+def workspace_reset(ctx: click.Context, name: str, yes: bool) -> None:
+    if not yes:
+        click.confirm(
+            f"Reset workspace {name}? This will delete all workspace contents.",
+            abort=True,
+        )
+    result = _run_admin_call(reset_workspace(name))
+    _emit_result(result, ctx.find_root().obj["as_json"])
+
+
+@workspace.command("export")
+@click.argument("name")
+@click.argument("path", type=click.Path(dir_okay=False, path_type=str))
+@click.pass_context
+def workspace_export(ctx: click.Context, name: str, path: str) -> None:
+    result = _run_admin_call(export_workspace(name, path))
+    _emit_result(result, ctx.find_root().obj["as_json"])
+
+
+@workspace.command("import")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=str))
+@click.option(
+    "--name",
+    "workspace_name",
+    default=None,
+    help="Import into this workspace name instead of the source name.",
+)
+@click.pass_context
+def workspace_import(
+    ctx: click.Context,
+    path: str,
+    workspace_name: str | None,
+) -> None:
+    as_json = ctx.find_root().obj["as_json"]
+    if as_json:
+        result = _run_admin_call(import_workspace(path, name=workspace_name))
+        _emit_result(result, as_json)
+        return
+
+    click.echo("Importing workspace records")
+    total = _workspace_import_progress_total(path)
+
+    with click.progressbar(length=total, label="Generating embeddings") as bar:
+        def update_progress(label: str, advance: int) -> None:
+            if not label.startswith("embedding_"):
+                return
+            bar.label = label.removeprefix("embedding_").replace("_", " ").title()
+            bar.update(advance)
+
+        result = _run_admin_call(
+            import_workspace(
+                path,
+                name=workspace_name,
+                progress=update_progress,
+            )
+        )
+    _emit_result(result, as_json)
 
 
 @cli.group()
@@ -506,6 +588,70 @@ def perspective_list(
         list_perspectives(workspace, include_global=not exclude_global)
     )
     _emit_result(result, ctx.find_root().obj["as_json"])
+
+
+@cli.group()
+def database() -> None:
+    """Database backup and restore commands."""
+
+
+@database.command("backup")
+@click.argument("path", type=click.Path(dir_okay=False, path_type=str))
+@click.option(
+    "--method",
+    type=click.Choice(["auto", "local", "docker"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="How to run PostgreSQL tooling.",
+)
+@click.pass_context
+def database_backup(ctx: click.Context, path: str, method: str) -> None:
+    result = backup_database(path, method=method)
+    _emit_result(result, ctx.find_root().obj["as_json"])
+
+
+@database.command("restore")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=str))
+@click.option(
+    "--method",
+    type=click.Choice(["auto", "local", "docker"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="How to run PostgreSQL tooling.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Skip the destructive restore confirmation prompt.",
+)
+@click.pass_context
+def database_restore(ctx: click.Context, path: str, method: str, yes: bool) -> None:
+    if not yes:
+        click.confirm(
+            f"Restore database from {path}? This will overwrite current database contents.",
+            abort=True,
+        )
+    result = restore_database(path, method=method)
+    _emit_result(result, ctx.find_root().obj["as_json"])
+
+
+@database.command("reembed")
+@click.pass_context
+def database_reembed(ctx: click.Context) -> None:
+    as_json = ctx.find_root().obj["as_json"]
+    if as_json:
+        result = _run_admin_call(reembed_database())
+        _emit_result(result, as_json)
+        return
+
+    total = _run_admin_call(count_reembed_targets())
+    with click.progressbar(length=total, label="Reembedding database") as bar:
+        result = _run_admin_call(
+            reembed_database(
+                progress=lambda _label, advance: bar.update(advance),
+            )
+        )
+    _emit_result(result, as_json)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

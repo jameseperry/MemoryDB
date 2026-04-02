@@ -4,12 +4,14 @@ import pytest
 import pytest_asyncio
 
 from memory_v3.admin import (
+    _parse_timestamp,
     create_workspace,
     delete_workspace,
     list_workspaces,
+    reembed_database,
     set_workspace_document_ids,
 )
-from memory_v3.admin_cli import main
+from memory_v3.admin_cli import _workspace_import_progress_total, main
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -82,6 +84,14 @@ class _FakeConn:
         if "UPDATE workspaces" in query:
             return self.updated_workspace_row
         raise AssertionError(query)
+
+
+def test_v3_parse_timestamp_from_export_snapshot():
+    parsed = _parse_timestamp("2026-04-02T16:20:51.426535+00:00")
+
+    assert parsed == datetime(2026, 4, 2, 16, 20, 51, 426535, tzinfo=timezone.utc)
+    assert _parse_timestamp(parsed) is parsed
+    assert _parse_timestamp(None) is None
 
 
 @pytest.mark.asyncio
@@ -433,3 +443,379 @@ def test_v3_cli_understanding_delete_missing(monkeypatch, capsys):
     assert exit_code == 1
     assert captured.out == ""
     assert captured.err.strip() == "understanding not found: 404"
+
+
+def test_v3_cli_workspace_reset_json(monkeypatch, capsys):
+    async def fake_init_pool():
+        return None
+
+    async def fake_close_pool():
+        return None
+
+    async def fake_reset_workspace(name: str):
+        assert name == "alpha"
+        return {
+            "name": name,
+            "subjects_deleted": 2,
+            "observations_deleted": 4,
+            "understandings_deleted": 3,
+            "perspectives_deleted": 1,
+            "utility_signals_deleted": 0,
+            "events_deleted": 5,
+        }
+
+    monkeypatch.setattr("memory_v3.admin_cli.init_pool", fake_init_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.close_pool", fake_close_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.reset_workspace", fake_reset_workspace)
+
+    exit_code = main(["--json", "workspace", "reset", "alpha", "--yes"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == (
+        '{"name": "alpha", "subjects_deleted": 2, "observations_deleted": 4, '
+        '"understandings_deleted": 3, "perspectives_deleted": 1, '
+        '"utility_signals_deleted": 0, "events_deleted": 5}'
+    )
+
+
+def test_v3_cli_workspace_export_text(monkeypatch, capsys):
+    async def fake_init_pool():
+        return None
+
+    async def fake_close_pool():
+        return None
+
+    async def fake_export_workspace(name: str, path: str):
+        assert name == "alpha"
+        assert path == "alpha.json"
+        return {
+            "name": name,
+            "path": "/tmp/alpha.json",
+            "subjects_exported": 2,
+        }
+
+    monkeypatch.setattr("memory_v3.admin_cli.init_pool", fake_init_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.close_pool", fake_close_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.export_workspace", fake_export_workspace)
+
+    exit_code = main(["workspace", "export", "alpha", "alpha.json"])
+
+    assert exit_code == 0
+    assert [
+        line.rstrip()
+        for line in capsys.readouterr().out.strip().splitlines()
+    ] == [
+        "field              value",
+        "-----------------  ---------------",
+        "name               alpha",
+        "path               /tmp/alpha.json",
+        "subjects_exported  2",
+    ]
+
+
+def test_v3_cli_workspace_import_json(monkeypatch, capsys, tmp_path):
+    snapshot = tmp_path / "workspace.json"
+    snapshot.write_text("{}", encoding="utf-8")
+
+    async def fake_init_pool():
+        return None
+
+    async def fake_close_pool():
+        return None
+
+    async def fake_import_workspace(path: str, *, name: str | None = None):
+        assert path == str(snapshot)
+        assert name == "beta"
+        return {
+            "name": "beta",
+            "source_name": "alpha",
+            "subjects_imported": 2,
+        }
+
+    monkeypatch.setattr("memory_v3.admin_cli.init_pool", fake_init_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.close_pool", fake_close_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.import_workspace", fake_import_workspace)
+
+    exit_code = main(
+        [
+            "--json",
+            "workspace",
+            "import",
+            str(snapshot),
+            "--name",
+            "beta",
+        ]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == (
+        '{"name": "beta", "source_name": "alpha", "subjects_imported": 2}'
+    )
+
+
+def test_v3_workspace_import_progress_total(tmp_path):
+    snapshot = tmp_path / "workspace.json"
+    snapshot.write_text(
+        """
+        {
+          "schema_version": 3,
+          "workspace": {"name": "alpha"},
+          "subjects": [{"id": 1}, {"id": 2}],
+          "observations": [{"id": 3}],
+          "understandings": [{"id": 4}],
+          "observation_subjects": [{"observation_id": 3, "subject_id": 1}],
+          "understanding_subjects": [{"understanding_id": 4, "subject_id": 1}],
+          "understanding_sources": [{"understanding_id": 4, "observation_id": 3}],
+          "perspectives": [{"name": "general"}],
+          "utility_signals": [{"target_id": 3}],
+          "events": [{"id": 5}]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    assert _workspace_import_progress_total(str(snapshot)) == 2
+
+
+def test_v3_cli_workspace_import_text_progress(monkeypatch, capsys, tmp_path):
+    snapshot = tmp_path / "workspace.json"
+    snapshot.write_text(
+        '{"schema_version": 3, "workspace": {"name": "alpha"}, '
+        '"subjects": [], '
+        '"observations": [{"id": 1, "content": "obs"}], '
+        '"understandings": [{"id": 2, "content": "u"}]}',
+        encoding="utf-8",
+    )
+
+    async def fake_init_pool():
+        return None
+
+    async def fake_close_pool():
+        return None
+
+    async def fake_import_workspace(
+        path: str,
+        *,
+        name: str | None = None,
+        progress=None,
+    ):
+        assert path == str(snapshot)
+        assert name is None
+        assert progress is not None
+        progress("embedding_observations", 1)
+        progress("embedding_understandings", 1)
+        return {
+            "name": "alpha",
+            "subjects_imported": 0,
+            "observations_imported": 1,
+            "understandings_imported": 1,
+        }
+
+    monkeypatch.setattr("memory_v3.admin_cli.init_pool", fake_init_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.close_pool", fake_close_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.import_workspace", fake_import_workspace)
+
+    exit_code = main(["workspace", "import", str(snapshot)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Importing workspace records" in captured.out
+    rows = [
+        line.split()
+        for line in captured.out.splitlines()
+        if line
+        and not line.startswith("Importing workspace records")
+        and not line.startswith("Generating embeddings")
+        and not line.startswith("Observations")
+        and not line.startswith("Understandings")
+        and not line.startswith("-")
+        and not line.startswith("field")
+    ]
+    assert ["name", "alpha"] in rows
+    assert ["subjects_imported", "0"] in rows
+    assert ["observations_imported", "1"] in rows
+    assert ["understandings_imported", "1"] in rows
+
+
+def test_v3_cli_database_backup_json(monkeypatch, capsys):
+    def fake_backup_database(path: str, method: str = "auto"):
+        assert path == "backup.sql"
+        assert method == "docker"
+        return {
+            "path": "/tmp/backup.sql",
+            "method": "docker",
+            "database": "memory_v3",
+        }
+
+    monkeypatch.setattr("memory_v3.admin_cli.backup_database", fake_backup_database)
+
+    exit_code = main(["--json", "database", "backup", "backup.sql", "--method", "docker"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == (
+        '{"path": "/tmp/backup.sql", "method": "docker", "database": "memory_v3"}'
+    )
+
+
+def test_v3_cli_database_restore_json(monkeypatch, capsys, tmp_path):
+    backup = tmp_path / "backup.sql"
+    backup.write_text("SELECT 1;", encoding="utf-8")
+
+    def fake_restore_database(path: str, method: str = "auto"):
+        assert path == str(backup)
+        assert method == "local"
+        return {
+            "path": str(backup),
+            "method": "local",
+            "database": "memory_v3",
+        }
+
+    monkeypatch.setattr("memory_v3.admin_cli.restore_database", fake_restore_database)
+
+    exit_code = main(
+        [
+            "--json",
+            "database",
+            "restore",
+            str(backup),
+            "--method",
+            "local",
+            "--yes",
+        ]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == (
+        f'{{"path": "{backup}", "method": "local", "database": "memory_v3"}}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_v3_reembed_database_regenerates_active_targets(monkeypatch):
+    class _FakeReembedConn:
+        def __init__(self):
+            self.deleted_embeddings = False
+
+        async def fetch(self, query, *args):
+            if "FROM workspaces" in query:
+                return [{"id": 1, "name": "alpha"}]
+            if "FROM observations" in query:
+                assert args == (1,)
+                return [
+                    {"id": 10, "content": "observation one"},
+                    {"id": 11, "content": "observation two"},
+                ]
+            if "FROM understandings" in query:
+                assert args == (1,)
+                assert "superseded_by IS NULL" in query
+                return [{"id": 20, "content": "understanding one"}]
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            assert query == "DELETE FROM embeddings"
+            assert args == ()
+            self.deleted_embeddings = True
+
+    conn = _FakeReembedConn()
+    embedded_calls = []
+    progress_calls = []
+
+    async def fake_get_pool():
+        return _FakePool(conn)
+
+    async def fake_embed_targets(conn_arg, *, workspace_id, targets, model_version=None):
+        assert conn_arg is conn
+        assert workspace_id == 1
+        assert model_version is None
+        embedded_calls.append(list(targets))
+
+    monkeypatch.setattr("memory_v3.admin.get_pool", fake_get_pool)
+    monkeypatch.setattr("memory_v3.admin.embed_targets", fake_embed_targets)
+
+    result = await reembed_database(
+        progress=lambda label, advance: progress_calls.append((label, advance))
+    )
+
+    assert conn.deleted_embeddings
+    assert embedded_calls == [
+        [
+            (10, "observation one"),
+            (11, "observation two"),
+            (20, "understanding one"),
+        ]
+    ]
+    assert progress_calls == [("alpha", 3)]
+    assert result == {
+        "workspaces_reembedded": 1,
+        "observations_reembedded": 2,
+        "understandings_reembedded": 1,
+    }
+
+
+def test_v3_cli_database_reembed_json(monkeypatch, capsys):
+    async def fake_init_pool():
+        return None
+
+    async def fake_close_pool():
+        return None
+
+    async def fake_reembed_database(*, progress=None):
+        assert progress is None
+        return {
+            "workspaces_reembedded": 2,
+            "observations_reembedded": 5,
+            "understandings_reembedded": 3,
+        }
+
+    monkeypatch.setattr("memory_v3.admin_cli.init_pool", fake_init_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.close_pool", fake_close_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.reembed_database", fake_reembed_database)
+
+    exit_code = main(["--json", "database", "reembed"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == (
+        '{"workspaces_reembedded": 2, "observations_reembedded": 5, '
+        '"understandings_reembedded": 3}'
+    )
+
+
+def test_v3_cli_database_reembed_text_progress(monkeypatch, capsys):
+    async def fake_init_pool():
+        return None
+
+    async def fake_close_pool():
+        return None
+
+    async def fake_count_reembed_targets():
+        return 3
+
+    async def fake_reembed_database(*, progress=None):
+        assert progress is not None
+        progress("alpha", 2)
+        progress("beta", 1)
+        return {
+            "workspaces_reembedded": 2,
+            "observations_reembedded": 2,
+            "understandings_reembedded": 1,
+        }
+
+    monkeypatch.setattr("memory_v3.admin_cli.init_pool", fake_init_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.close_pool", fake_close_pool)
+    monkeypatch.setattr(
+        "memory_v3.admin_cli.count_reembed_targets",
+        fake_count_reembed_targets,
+    )
+    monkeypatch.setattr("memory_v3.admin_cli.reembed_database", fake_reembed_database)
+
+    exit_code = main(["database", "reembed"])
+
+    assert exit_code == 0
+    rows = [
+        line.split()
+        for line in capsys.readouterr().out.splitlines()
+        if line and not line.startswith("Reembedding database") and not line.startswith("-")
+    ]
+    assert ["workspaces_reembedded", "2"] in rows
+    assert ["observations_reembedded", "2"] in rows
+    assert ["understandings_reembedded", "1"] in rows
