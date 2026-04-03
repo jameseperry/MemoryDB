@@ -1738,7 +1738,7 @@ async def orient(
                       JOIN observation_subjects os ON os.observation_id = o.id
                       JOIN understandings u ON u.id = s.single_subject_understanding_id
                       WHERE os.subject_id = s.id
-                        AND o.generation >= u.generation
+                        AND o.generation > u.generation
                   )
               )
             """,

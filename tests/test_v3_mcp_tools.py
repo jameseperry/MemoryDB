@@ -1212,6 +1212,81 @@ async def test_v3_orient_rejects_superseded_special_pointer(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_v3_orient_uses_strict_generation_for_pending_subjects(monkeypatch):
+    captured = {}
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "FROM workspaces" in query:
+                assert args == ("james/gpt",)
+                return {
+                    "id": 7,
+                    "soul_understanding_id": None,
+                    "protocol_understanding_id": None,
+                    "orientation_understanding_id": None,
+                    "last_consolidated_at": None,
+                }
+            if "INSERT INTO sessions" in query and "RETURNING model_tier" in query:
+                assert args == (7, "conversation-42", None)
+                return {"model_tier": None}
+            if "INSERT INTO sessions" in query and "RETURNING session_id" in query:
+                assert args == (7, "conversation-42")
+                return {"session_id": 99}
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            if "DELETE FROM surfaced_in_session" in query:
+                assert args == (7, "conversation-42")
+                return None
+            if "INSERT INTO events" in query:
+                assert args == (
+                    7,
+                    99,
+                    "orient",
+                    json.dumps({"session_reset": True}),
+                )
+                return None
+            raise AssertionError(query)
+
+        async def fetchval(self, query, *args):
+            if "SELECT COUNT(*)" in query and "FROM subjects s" in query:
+                captured["pending_subjects_query"] = query
+                assert args == (7,)
+                return 0
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_effective_workspace_name",
+        lambda workspace=None: "james/gpt",
+    )
+
+    result = await tools_module.orient(workspace="james/gpt")
+
+    assert result["pending_consolidation_count"] == 0
+    assert "o.generation > u.generation" in captured["pending_subjects_query"]
+    assert "o.generation >= u.generation" not in captured["pending_subjects_query"]
+
+
+@pytest.mark.asyncio
 async def test_v3_set_workspace_documents_validates_active_understandings(monkeypatch):
     captured = {}
 
