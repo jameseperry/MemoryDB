@@ -1042,7 +1042,7 @@ async def query_observations(
             JOIN observation_subjects os ON os.observation_id = o.id
             WHERE o.workspace_id = $1
               AND o.content_tsv @@ plainto_tsquery('english', $2)
-            GROUP BY o.id
+            GROUP BY o.id, o.content, o.created_at
             HAVING ARRAY_AGG(os.subject_id ORDER BY os.subject_id)
                 @> $3::bigint[]
             ORDER BY score DESC, o.created_at DESC
@@ -1138,7 +1138,7 @@ async def get_understandings(
             JOIN understanding_subjects us ON us.understanding_id = u.id
             WHERE u.workspace_id = $1
               AND u.superseded_by IS NULL
-            GROUP BY u.id
+            GROUP BY u.id, u.content, u.summary, u.kind, u.generation, u.created_at
             HAVING ARRAY_AGG(us.subject_id ORDER BY us.subject_id)
                 @> $2::bigint[]
             ORDER BY u.created_at DESC
@@ -2236,7 +2236,7 @@ async def open_intersection(
             WHERE u.workspace_id = $1
               AND u.kind = 'relationship'
               AND u.superseded_by IS NULL
-            GROUP BY u.id
+            GROUP BY u.id, u.content, u.summary, u.generation, u.model_tier, u.created_at
             HAVING ARRAY_AGG(us.subject_id ORDER BY us.subject_id) = $2::bigint[]
             ORDER BY u.created_at DESC
             LIMIT 1
@@ -2258,7 +2258,7 @@ async def open_intersection(
                     WHERE us2.understanding_id = u.id
               ))
               AND ($3::bigint IS NULL OR u.id != $3)
-            GROUP BY u.id
+            GROUP BY u.id, u.summary, u.created_at
             ORDER BY u.created_at DESC
             """,
             workspace_id,
@@ -2272,7 +2272,7 @@ async def open_intersection(
             FROM observations o
             JOIN observation_subjects os ON os.observation_id = o.id
             WHERE o.workspace_id = $1
-            GROUP BY o.id
+            GROUP BY o.id, o.content, o.kind, o.created_at
             HAVING ARRAY_AGG(os.subject_id ORDER BY os.subject_id) @> $2::bigint[]
             ORDER BY o.created_at DESC
             """,
