@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -83,6 +85,13 @@ def _local_database_url() -> str:
     return settings.async_database_url.replace("postgresql+psycopg2://", "postgresql://")
 
 
+def _docker_command_prefix() -> list[str]:
+    command = shlex.split(os.environ.get("DOCKER_CMD", "docker"))
+    if not command:
+        raise ValueError("DOCKER_CMD must not be empty")
+    return command
+
+
 def _resolve_database_method(method: str, *, required_local_tools: tuple[str, ...]) -> str:
     if method not in {"auto", "local", "docker"}:
         raise ValueError(f"Unsupported method: {method}")
@@ -97,7 +106,7 @@ def _resolve_database_method(method: str, *, required_local_tools: tuple[str, ..
             raise RuntimeError(f"Missing required local PostgreSQL tools: {missing}")
 
     if method in {"auto", "docker"}:
-        if shutil.which("docker"):
+        if shutil.which(_docker_command_prefix()[0]):
             return "docker"
         raise RuntimeError(
             "Docker is required for backup/restore when local PostgreSQL tools are unavailable"
@@ -241,7 +250,7 @@ def backup_database(path: str | Path, method: str = "auto") -> dict:
         ]
     else:
         command = [
-            "docker",
+            *_docker_command_prefix(),
             "compose",
             "exec",
             "-T",
@@ -288,7 +297,7 @@ def restore_database(path: str | Path, method: str = "auto") -> dict:
         ]
     else:
         command = [
-            "docker",
+            *_docker_command_prefix(),
             "compose",
             "exec",
             "-T",
