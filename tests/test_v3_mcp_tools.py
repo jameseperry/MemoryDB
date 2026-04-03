@@ -471,6 +471,121 @@ async def test_v3_add_observations_uses_session_model_tier(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_v3_create_understanding_uses_session_model_tier(monkeypatch):
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "INSERT INTO sessions" in query:
+                assert args == (7, "conversation-42")
+                return {"session_id": 99}
+            raise AssertionError(query)
+
+        async def fetchval(self, query, *args):
+            if "SELECT model_tier" in query and "FROM sessions" in query:
+                assert args == (7, "conversation-42")
+                return "claude-sonnet-4-6"
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_resolve_workspace_id(_conn, workspace):
+        assert workspace == "james/claude"
+        return 7
+
+    async def fake_require_subjects(_conn, workspace_id, subject_names):
+        assert workspace_id == 7
+        assert subject_names == ["memory_system_v3"]
+        return [{"id": 101, "name": "memory_system_v3"}]
+
+    async def fake_get_workspace_generation(_conn, workspace_id):
+        assert workspace_id == 7
+        return 3
+
+    async def fake_create_understanding_record(
+        _conn,
+        *,
+        workspace_id,
+        subject_rows,
+        content,
+        summary,
+        kind,
+        generation,
+        session_id,
+        source_observation_ids=None,
+        reason=None,
+        model_tier=None,
+    ):
+        assert workspace_id == 7
+        assert subject_rows == [{"id": 101, "name": "memory_system_v3"}]
+        assert content == "Memory3 prefers consolidated prose edges."
+        assert summary == "prose edges"
+        assert kind == "single_subject"
+        assert generation == 3
+        assert session_id == "conversation-42"
+        assert source_observation_ids == [55]
+        assert reason == "manual synthesis"
+        assert model_tier == "claude-sonnet-4-6"
+        return {
+            "id": 88,
+            "created_at": datetime(2026, 4, 2, tzinfo=timezone.utc),
+        }
+
+    async def fake_record_event(_conn, *, workspace_id, session_id, operation, detail):
+        assert workspace_id == 7
+        assert session_id == "conversation-42"
+        assert operation == "create_understanding"
+        assert detail == {
+            "understanding_id": 88,
+            "kind": "single_subject",
+            "subject_names": ["memory_system_v3"],
+        }
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr("memory_v3.tools.resolve_workspace_id", fake_resolve_workspace_id)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+    monkeypatch.setattr("memory_v3.tools._require_subjects", fake_require_subjects)
+    monkeypatch.setattr(
+        "memory_v3.tools.get_workspace_generation",
+        fake_get_workspace_generation,
+    )
+    monkeypatch.setattr(
+        "memory_v3.tools._create_understanding_record",
+        fake_create_understanding_record,
+    )
+    monkeypatch.setattr("memory_v3.tools.record_event", fake_record_event)
+
+    result = await tools_module.create_understanding(
+        ["memory_system_v3"],
+        "Memory3 prefers consolidated prose edges.",
+        "prose edges",
+        source_observation_ids=[55],
+        workspace="james/claude",
+        reason="manual synthesis",
+    )
+
+    assert result == {
+        "id": 88,
+        "subject_names": ["memory_system_v3"],
+        "kind": "single_subject",
+        "created_at": "2026-04-02T00:00:00+00:00",
+    }
+
+
+@pytest.mark.asyncio
 async def test_v3_get_consolidation_report_uses_strict_generation_staleness(monkeypatch):
     captured = {}
 
@@ -907,6 +1022,9 @@ async def test_v3_update_understanding_rejects_superseded_understanding(monkeypa
             raise AssertionError(query)
 
         async def fetchrow(self, query, *args):
+            if "INSERT INTO sessions" in query:
+                assert args == (7, "conversation-42")
+                return {"session_id": 99}
             if "SELECT id, kind, superseded_by" in query:
                 assert args == (7, 33)
                 return {

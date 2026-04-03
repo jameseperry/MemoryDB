@@ -586,7 +586,7 @@ async def get_subjects(
                     WHERE os.subject_id = s.id
                 ) AS observation_count,
                 (
-                    SELECT MAX(o.observed_at)
+                    SELECT MAX(o.created_at)
                     FROM observations o
                     JOIN observation_subjects os ON os.observation_id = o.id
                     WHERE os.subject_id = s.id
@@ -738,11 +738,11 @@ async def set_structural_understanding(
 ) -> dict:
     """Write or replace a subject's structural understanding."""
     pool = await get_pool()
-    session_id = resolve_optional_session_id()
+    effective_session_id = resolve_optional_session_id()
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
-        session_row_id = await resolve_session_id(
+        await resolve_session_id(
             conn,
             workspace_id=workspace_id,
             session_token=effective_session_id,
@@ -750,7 +750,7 @@ async def set_structural_understanding(
         model_tier = await _get_session_model_tier(
             conn,
             workspace_id,
-            session_id,
+            effective_session_id,
         )
         subject_rows = await _require_subjects(conn, workspace_id, [subject_name])
         generation = await get_workspace_generation(conn, workspace_id)
@@ -762,13 +762,13 @@ async def set_structural_understanding(
             summary=content[:160],
             kind="structural",
             generation=generation,
-            session_id=session_id,
+            session_id=effective_session_id,
             model_tier=model_tier,
         )
         await record_event(
             conn,
             workspace_id=workspace_id,
-            session_id=session_id,
+            session_id=effective_session_id,
             operation="set_structural_understanding",
             detail={"subject_name": subject_name, "understanding_id": understanding["id"]},
         )
@@ -872,9 +872,9 @@ async def add_observations(
                     """
                     INSERT INTO observations (
                         workspace_id, content, content_hash, kind, confidence,
-                        generation, observed_at, session_id, model_tier
+                        generation, session_id, model_tier
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, NOW()), $8, $9)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     RETURNING id, content, created_at
                     """,
                     workspace_id,
@@ -883,7 +883,6 @@ async def add_observations(
                     item.get("kind"),
                     item.get("confidence"),
                     generation,
-                    item.get("observed_at"),
                     session_row_id,
                     model_tier,
                 )
@@ -1075,6 +1074,11 @@ async def create_understanding(
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
+        await resolve_session_id(
+            conn,
+            workspace_id=workspace_id,
+            session_token=effective_session_id,
+        )
         model_tier = await _get_session_model_tier(
             conn,
             workspace_id,
@@ -1251,6 +1255,11 @@ async def update_understanding(
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
+        session_row_id = await resolve_session_id(
+            conn,
+            workspace_id=workspace_id,
+            session_token=effective_session_id,
+        )
         model_tier = await _get_session_model_tier(
             conn,
             workspace_id,
@@ -1532,11 +1541,11 @@ async def recall(
                 ]
             recent_observations = await conn.fetch(
                 """
-                SELECT o.id, o.content, o.kind, o.observed_at
+                SELECT o.id, o.content, o.kind, o.created_at
                 FROM observations o
                 JOIN observation_subjects os ON os.observation_id = o.id
                 WHERE os.subject_id = $1
-                ORDER BY o.observed_at DESC
+                ORDER BY o.created_at DESC
                 LIMIT 5
                 """,
                 subject_row["id"],
@@ -1590,7 +1599,7 @@ async def recall(
                         "id": row["id"],
                         "content": row["content"],
                         "kind": row["kind"],
-                        "observed_at": row["observed_at"].isoformat(),
+                        "created_at": row["created_at"].isoformat(),
                     }
                     for row in recent_observations
                 ],
@@ -2150,27 +2159,17 @@ async def _mark_signal(
         )
         target_kind = await conn.fetchval(
             """
-            SELECT ir.kind
-            FROM id_registry ir
-            WHERE ir.id = $1
+            SELECT r.record_type
+            FROM records r
+            LEFT JOIN understanding_records u ON u.id = r.id
+            WHERE r.id = $1
+              AND r.workspace_id = $2
               AND (
                   (
-                      ir.kind = 'observation'
-                      AND EXISTS (
-                          SELECT 1
-                          FROM observations o
-                          WHERE o.id = ir.id
-                            AND o.workspace_id = $2
-                      )
+                      r.record_type = 'observation'
                   ) OR (
-                      ir.kind = 'understanding'
-                      AND EXISTS (
-                          SELECT 1
-                          FROM understandings u
-                          WHERE u.id = ir.id
-                            AND u.workspace_id = $2
-                            AND u.superseded_by IS NULL
-                      )
+                      r.record_type = 'understanding'
+                      AND u.superseded_by IS NULL
                   )
               )
             """,
@@ -2184,10 +2183,17 @@ async def _mark_signal(
 
         row = await conn.fetchrow(
             """
-            INSERT INTO utility_signals (target_id, signal_type, reason, session_id)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO utility_signals (
+                workspace_id,
+                target_id,
+                signal_type,
+                reason,
+                session_id
+            )
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING id, created_at
             """,
+            workspace_id,
             id,
             signal_type,
             reason,
@@ -2262,13 +2268,13 @@ async def open_intersection(
 
         observations = await conn.fetch(
             """
-            SELECT o.id, o.content, o.kind, o.observed_at
+            SELECT o.id, o.content, o.kind, o.created_at
             FROM observations o
             JOIN observation_subjects os ON os.observation_id = o.id
             WHERE o.workspace_id = $1
             GROUP BY o.id
             HAVING ARRAY_AGG(os.subject_id ORDER BY os.subject_id) @> $2::bigint[]
-            ORDER BY o.observed_at DESC
+            ORDER BY o.created_at DESC
             """,
             workspace_id,
             subject_ids,
@@ -2298,7 +2304,7 @@ async def open_intersection(
                 "id": row["id"],
                 "content": row["content"],
                 "kind": row["kind"],
-                "observed_at": row["observed_at"].isoformat(),
+                "created_at": row["created_at"].isoformat(),
             }
             for row in observations
         ],
@@ -2385,9 +2391,11 @@ async def open_around(
                 FROM subjects s
                 JOIN embeddings e1
                   ON e1.target_id = $2
+                 AND e1.workspace_id = $4
                  AND e1.perspective_id = $3
                 JOIN embeddings e2
                   ON e2.target_id = s.single_subject_understanding_id
+                 AND e2.workspace_id = $4
                  AND e2.perspective_id = $3
                 WHERE s.id = ANY($1)
                   AND s.single_subject_understanding_id IS NOT NULL
@@ -2395,6 +2403,7 @@ async def open_around(
                 [row["id"] for row in neighbor_rows],
                 subject_row["single_subject_understanding_id"],
                 perspective_id,
+                workspace_id,
             )
             similarity_by_neighbor = {
                 row["neighbor_id"]: float(row["similarity"]) for row in sim_rows
@@ -2586,9 +2595,11 @@ async def get_consolidation_report(
             JOIN general_perspective gp ON TRUE
             JOIN embeddings ea
               ON ea.target_id = sa.single_subject_understanding_id
+             AND ea.workspace_id = $1
              AND ea.perspective_id = gp.id
             JOIN embeddings eb
               ON eb.target_id = sb.single_subject_understanding_id
+             AND eb.workspace_id = $1
              AND eb.perspective_id = gp.id
             WHERE pair_overlap.intersection_size >= $2
               AND NOT EXISTS (
@@ -2614,12 +2625,8 @@ async def get_consolidation_report(
             """
             SELECT target_id AS id, signal_type AS kind, reason, created_at AS flagged_at
             FROM utility_signals
-            WHERE signal_type = 'questionable'
-              AND target_id IN (
-                  SELECT id FROM observations WHERE workspace_id = $1
-                  UNION
-                  SELECT id FROM understandings WHERE workspace_id = $1
-              )
+            WHERE workspace_id = $1
+              AND signal_type = 'questionable'
             ORDER BY created_at DESC
             LIMIT 20
             """,
@@ -2763,9 +2770,11 @@ async def find_similar_subjects(
              AND sb.id > sa.id
             JOIN embeddings ea
               ON ea.target_id = sa.single_subject_understanding_id
+             AND ea.workspace_id = $1
              AND ea.perspective_id = $2
             JOIN embeddings eb
               ON eb.target_id = sb.single_subject_understanding_id
+             AND eb.workspace_id = $1
              AND eb.perspective_id = $2
             WHERE sa.workspace_id = $1
               AND sa.single_subject_understanding_id IS NOT NULL
@@ -2881,14 +2890,17 @@ async def get_stats(
                         (
                             SELECT COUNT(DISTINCT e.target_id)
                             FROM embeddings e
-                            JOIN id_registry ir ON ir.id = e.target_id
-                            WHERE (
-                                (ir.kind = 'observation' AND EXISTS (
-                                    SELECT 1 FROM observations o WHERE o.id = e.target_id AND o.workspace_id = $1
-                                )) OR
-                                (ir.kind = 'understanding' AND EXISTS (
-                                    SELECT 1 FROM understandings u WHERE u.id = e.target_id AND u.workspace_id = $1 AND u.superseded_by IS NULL
-                                ))
+                            JOIN records r
+                              ON r.id = e.target_id
+                             AND r.workspace_id = e.workspace_id
+                            LEFT JOIN understanding_records u ON u.id = r.id
+                            WHERE e.workspace_id = $1
+                              AND (
+                                r.record_type = 'observation'
+                                OR (
+                                    r.record_type = 'understanding'
+                                    AND u.superseded_by IS NULL
+                                )
                             )
                         )::numeric
                         /

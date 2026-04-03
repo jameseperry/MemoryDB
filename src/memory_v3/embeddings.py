@@ -70,16 +70,28 @@ async def embed_targets(
         )
         await conn.executemany(
             """
-            INSERT INTO embeddings (target_id, perspective_id, vector, model_version)
-            VALUES ($1, $2, $3::vector, $4)
-            ON CONFLICT (target_id, perspective_id)
+            INSERT INTO embeddings (
+                workspace_id,
+                target_id,
+                perspective_id,
+                vector,
+                model_version
+            )
+            VALUES ($1, $2, $3, $4::vector, $5)
+            ON CONFLICT (workspace_id, target_id, perspective_id)
                 DO UPDATE SET
                     vector = EXCLUDED.vector,
                     model_version = EXCLUDED.model_version,
                     created_at = NOW()
             """,
             [
-                (target_id, perspective["id"], str(vector), model_version)
+                (
+                    workspace_id,
+                    target_id,
+                    perspective["id"],
+                    str(vector),
+                    model_version,
+                )
                 for target_id, vector in zip(target_ids, vectors)
             ],
         )
@@ -153,7 +165,8 @@ async def search_embeddings(
                 1 - (e.vector <=> $3::vector) AS score
             FROM embeddings e
             JOIN active_targets a ON a.target_id = e.target_id
-            WHERE e.perspective_id = $2
+            WHERE e.workspace_id = $1
+              AND e.perspective_id = $2
               AND ($4::text IS NULL OR a.target_kind = $4)
             ORDER BY e.vector <=> $3::vector
             LIMIT $5

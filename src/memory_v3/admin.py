@@ -147,9 +147,39 @@ async def _get_workspace_id(conn, workspace: str) -> int:
     return workspace_id
 
 
-async def _cleanup_target_metadata(conn, target_id: int) -> None:
-    await conn.execute("DELETE FROM embeddings WHERE target_id = $1", target_id)
-    await conn.execute("DELETE FROM id_registry WHERE id = $1", target_id)
+async def _cleanup_target_metadata(
+    conn,
+    *,
+    workspace_id: int,
+    target_id: int,
+) -> None:
+    await conn.execute(
+        """
+        DELETE FROM utility_signals
+        WHERE workspace_id = $1
+          AND target_id = $2
+        """,
+        workspace_id,
+        target_id,
+    )
+    await conn.execute(
+        """
+        DELETE FROM embeddings
+        WHERE workspace_id = $1
+          AND target_id = $2
+        """,
+        workspace_id,
+        target_id,
+    )
+    await conn.execute(
+        """
+        DELETE FROM records
+        WHERE workspace_id = $1
+          AND id = $2
+        """,
+        workspace_id,
+        target_id,
+    )
 
 
 async def _subject_names_for_observations(conn, observation_ids: list[int]) -> dict[int, list[str]]:
@@ -443,11 +473,26 @@ async def _collect_workspace_ids(conn, workspace_id: int) -> dict[str, list[int]
     surfaced_rows = []
     if target_ids:
         utility_signal_rows = await conn.fetch(
-            "SELECT id FROM utility_signals WHERE target_id = ANY($1) ORDER BY id",
+            """
+            SELECT id
+            FROM utility_signals
+            WHERE workspace_id = $1
+              AND target_id = ANY($2)
+            ORDER BY id
+            """,
+            workspace_id,
             target_ids,
         )
         surfaced_rows = await conn.fetch(
-            "SELECT DISTINCT id FROM surfaced_in_session WHERE id = ANY($1) ORDER BY id",
+            """
+            SELECT DISTINCT sis.id
+            FROM surfaced_in_session sis
+            JOIN sessions s ON s.session_id = sis.session_id
+            WHERE s.workspace_id = $1
+              AND sis.id = ANY($2)
+            ORDER BY sis.id
+            """,
+            workspace_id,
             target_ids,
         )
     event_rows = await conn.fetch(
@@ -515,7 +560,12 @@ async def reset_workspace(name: str) -> dict:
                 )
             if ids["utility_signal_ids"]:
                 await conn.execute(
-                    "DELETE FROM utility_signals WHERE id = ANY($1)",
+                    """
+                    DELETE FROM utility_signals
+                    WHERE workspace_id = $1
+                      AND id = ANY($2)
+                    """,
+                    workspace_id,
                     ids["utility_signal_ids"],
                 )
             if ids["understanding_ids"]:
@@ -543,17 +593,10 @@ async def reset_workspace(name: str) -> dict:
                     "DELETE FROM events WHERE id = ANY($1)",
                     ids["event_ids"],
                 )
-            registry_ids = ids["observation_ids"] + ids["understanding_ids"]
-            if ids["observation_ids"] or ids["understanding_ids"]:
-                await conn.execute(
-                    "DELETE FROM embeddings WHERE target_id = ANY($1)",
-                    ids["observation_ids"] + ids["understanding_ids"],
-                )
-            if registry_ids:
-                await conn.execute(
-                    "DELETE FROM id_registry WHERE id = ANY($1)",
-                    registry_ids,
-                )
+            await conn.execute(
+                "DELETE FROM sessions WHERE workspace_id = $1",
+                workspace_id,
+            )
 
     return {
         "name": name,
@@ -618,7 +661,6 @@ async def export_workspace(name: str, path: str | Path) -> dict:
                     o.kind,
                     o.confidence,
                     o.generation,
-                    o.observed_at,
                     s.session_token AS session_id,
                     o.model_tier,
                     o.created_at
@@ -902,16 +944,14 @@ async def import_workspace(
                         kind,
                         confidence,
                         generation,
-                        observed_at,
                         session_id,
                         model_tier,
                         created_at
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, $6,
-                        COALESCE($7::timestamptz, NOW()),
-                        $8, $9,
-                        COALESCE($10::timestamptz, NOW())
+                        $7, $8,
+                        COALESCE($9::timestamptz, NOW())
                     )
                     RETURNING id
                     """,
@@ -921,7 +961,6 @@ async def import_workspace(
                     observation.get("kind"),
                     observation.get("confidence"),
                     observation["generation"],
-                    _parse_timestamp(observation.get("observed_at")),
                     observation_session_id,
                     observation.get("model_tier"),
                     _parse_timestamp(observation.get("created_at")),
@@ -1111,6 +1150,7 @@ async def import_workspace(
                         )
                     utility_signal_rows.append(
                         (
+                            workspace_id,
                             observation_id_map.get(item["target_id"])
                             or understanding_id_map[item["target_id"]],
                             item["signal_type"],
@@ -1122,6 +1162,7 @@ async def import_workspace(
                 await conn.executemany(
                     """
                     INSERT INTO utility_signals (
+                        workspace_id,
                         target_id,
                         signal_type,
                         reason,
@@ -1129,8 +1170,8 @@ async def import_workspace(
                         created_at
                     )
                     VALUES (
-                        $1, $2, $3, $4,
-                        COALESCE($5::timestamptz, NOW())
+                        $1, $2, $3, $4, $5,
+                        COALESCE($6::timestamptz, NOW())
                     )
                     """,
                     utility_signal_rows,
@@ -1446,7 +1487,6 @@ async def list_observations(
                 o.kind,
                 o.confidence,
                 o.generation,
-                o.observed_at,
                 sess.session_token AS session_id,
                 o.model_tier,
                 o.created_at
@@ -1516,7 +1556,6 @@ async def show_observation(workspace: str, observation_id: int) -> dict:
                 o.kind,
                 o.confidence,
                 o.generation,
-                o.observed_at,
                 s.session_token AS session_id,
                 o.model_tier,
                 o.created_at
@@ -1566,7 +1605,11 @@ async def delete_observation(workspace: str, observation_id: int) -> dict:
             observation_id,
         )
         if row is not None:
-            await _cleanup_target_metadata(conn, observation_id)
+            await _cleanup_target_metadata(
+                conn,
+                workspace_id=workspace_id,
+                target_id=observation_id,
+            )
     return {"id": observation_id, "deleted": row is not None}
 
 
@@ -1747,7 +1790,11 @@ async def delete_understanding(workspace: str, understanding_id: int) -> dict:
                 understanding_id,
             )
             if row is not None:
-                await _cleanup_target_metadata(conn, understanding_id)
+                await _cleanup_target_metadata(
+                    conn,
+                    workspace_id=workspace_id,
+                    target_id=understanding_id,
+                )
     return {"id": understanding_id, "deleted": row is not None}
 
 
@@ -1762,19 +1809,17 @@ async def list_utility_signals(workspace: str, limit: int = 100) -> list[dict]:
             SELECT
                 us.id,
                 us.target_id,
-                ir.kind AS target_kind,
+                r.record_type AS target_kind,
                 us.signal_type,
                 us.reason,
                 s.session_token AS session_id,
                 us.created_at
             FROM utility_signals us
             LEFT JOIN sessions s ON s.session_id = us.session_id
-            JOIN id_registry ir ON ir.id = us.target_id
-            WHERE EXISTS (
-                SELECT 1 FROM observations o WHERE o.id = us.target_id AND o.workspace_id = $1
-            ) OR EXISTS (
-                SELECT 1 FROM understandings u WHERE u.id = us.target_id AND u.workspace_id = $1
-            )
+            JOIN records r
+              ON r.id = us.target_id
+             AND r.workspace_id = us.workspace_id
+            WHERE us.workspace_id = $1
             ORDER BY us.created_at DESC
             LIMIT $2
             """,
