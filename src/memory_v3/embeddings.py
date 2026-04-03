@@ -3,15 +3,62 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 import asyncpg
 
-from memory_mcp.embeddings import embed_documents, embed_query
 from memory_v3.config import settings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+
+logger = logging.getLogger(__name__)
+_nomic_bert_logger = logging.getLogger(
+    "transformers_modules.nomic_hyphen_ai.nomic_hyphen_bert_hyphen_2048"
+)
+_model = None
+
+
+def get_model():
+    """Load the embedding model lazily on first use."""
+    global _model
+    if _model is None:
+        from sentence_transformers import SentenceTransformer
+
+        # The remote Nomic model implementation logs successful state-dict loads
+        # at WARNING level, which produces "<All keys matched successfully>" noise.
+        if _nomic_bert_logger.level < logging.ERROR:
+            _nomic_bert_logger.setLevel(logging.ERROR)
+
+        logger.info("Loading embed model %s...", settings.embed_model_name)
+        _model = SentenceTransformer(
+            settings.embed_model_name,
+            trust_remote_code=True,
+        )
+        logger.info("Model loaded.")
+    return _model
+
+
+def _prepend(instruction: str, texts: list[str]) -> list[str]:
+    return [f"{instruction} {text}" for text in texts]
+
+
+def embed_documents(texts: list[str], instruction: str) -> list[list[float]]:
+    """Embed a batch of record contents for indexing."""
+    model = get_model()
+    prefixed = _prepend(f"search_document: {instruction}", texts)
+    vectors = model.encode(prefixed, normalize_embeddings=True)
+    return vectors.tolist()
+
+
+def embed_query(text: str, instruction: str) -> list[float]:
+    """Embed a retrieval query."""
+    model = get_model()
+    prefixed = f"search_query: {instruction} {text}"
+    vector = model.encode([prefixed], normalize_embeddings=True)
+    return vector[0].tolist()
 
 
 async def get_perspectives(

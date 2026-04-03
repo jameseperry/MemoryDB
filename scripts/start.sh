@@ -29,10 +29,6 @@ if ! docker compose exec -T postgres \
 fi
 
 # --- Run migrations ---
-echo "==> Running migrations..."
-DATABASE_URL="${DATABASE_URL:-postgresql+psycopg2://memory:memory@localhost:5432/memory}" \
-    .venv/bin/alembic upgrade head
-
 echo "==> Running v3 migrations..."
 DATABASE_URL_V3="${DATABASE_URL_V3:-postgresql+psycopg2://memory:memory@localhost:5432/memory_v3}" \
     .venv/bin/alembic -c alembic_v3.ini upgrade head

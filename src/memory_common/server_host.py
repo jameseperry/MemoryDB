@@ -151,11 +151,6 @@ def run_host(
     """Run a shared Memory MCP host under Uvicorn."""
 
     log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
-    log_config["loggers"]["memory_mcp"] = {
-        "handlers": ["default"],
-        "level": "INFO",
-        "propagate": False,
-    }
     log_config["loggers"]["memory_v3"] = {
         "handlers": ["default"],
         "level": "INFO",

@@ -9,12 +9,14 @@ from starlette.middleware import Middleware
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
-from memory_mcp import mcp_tools
-from memory_mcp.config import settings
-from memory_mcp.db import resolve_effective_workspace_name
-from memory_common.server_host import _drop_duplicate_response_start
-from memory_mcp.server import RequireWorkspaceHeaderMiddleware
-from memory_mcp.tools import consolidation
+from memory_common.server_host import (
+    RequireWorkspaceHeaderMiddleware,
+    _drop_duplicate_response_start,
+)
+from memory_v3 import mcp_tools
+from memory_v3.config import settings
+from memory_v3.db import resolve_effective_workspace_name
+from memory_v3 import tools
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -31,7 +33,7 @@ async def isolated_workspace():
 
 def test_resolve_effective_workspace_uses_header(monkeypatch):
     monkeypatch.setattr(
-        "memory_mcp.db.get_http_headers",
+        "memory_v3.db.get_http_headers",
         lambda: {settings.mcp_workspace_header.lower(): "james/codex"},
     )
     assert resolve_effective_workspace_name(None) == "james/codex"
@@ -39,7 +41,7 @@ def test_resolve_effective_workspace_uses_header(monkeypatch):
 
 def test_resolve_effective_workspace_rejects_mismatch(monkeypatch):
     monkeypatch.setattr(
-        "memory_mcp.db.get_http_headers",
+        "memory_v3.db.get_http_headers",
         lambda: {settings.mcp_workspace_header.lower(): "james/codex"},
     )
     with pytest.raises(ValueError, match="does not match"):
@@ -47,7 +49,7 @@ def test_resolve_effective_workspace_rejects_mismatch(monkeypatch):
 
 
 def test_resolve_effective_workspace_allows_direct_calls_without_header(monkeypatch):
-    monkeypatch.setattr("memory_mcp.db.get_http_headers", lambda: {})
+    monkeypatch.setattr("memory_v3.db.get_http_headers", lambda: {})
     assert resolve_effective_workspace_name("james/codex") == "james/codex"
     with pytest.raises(ValueError, match="Workspace is required"):
         resolve_effective_workspace_name(None)
@@ -55,7 +57,7 @@ def test_resolve_effective_workspace_allows_direct_calls_without_header(monkeypa
 
 def test_resolve_effective_workspace_rejects_empty_header(monkeypatch):
     monkeypatch.setattr(
-        "memory_mcp.db.get_http_headers",
+        "memory_v3.db.get_http_headers",
         lambda: {settings.mcp_workspace_header.lower(): "   "},
     )
     with pytest.raises(ValueError, match="cannot be empty"):
@@ -128,30 +130,37 @@ async def test_workspace_header_allows_request():
 
 def test_mcp_wrappers_do_not_expose_workspace():
     wrappers = [
-        mcp_tools.create_entities,
-        mcp_tools.delete_entities,
-        mcp_tools.open_nodes,
-        mcp_tools.get_nodes_by_type,
-        mcp_tools.get_recently_modified,
-        mcp_tools.set_summary,
-        mcp_tools.set_tags,
+        mcp_tools.orient,
+        mcp_tools.bring_to_mind,
+        mcp_tools.recall,
+        mcp_tools.reset_seen,
+        mcp_tools.set_session_model_tier,
+        mcp_tools.set_workspace_documents,
+        mcp_tools.remember,
+        mcp_tools.update_understanding,
+        mcp_tools.mark_useful,
+        mcp_tools.mark_questionable,
+        mcp_tools.create_subjects,
+        mcp_tools.get_subjects,
+        mcp_tools.set_subject_summary,
+        mcp_tools.set_subject_tags,
+        mcp_tools.set_structural_understanding,
+        mcp_tools.get_subjects_by_tag,
         mcp_tools.add_observations,
-        mcp_tools.replace_observation,
         mcp_tools.delete_observations,
         mcp_tools.query_observations,
-        mcp_tools.create_relations,
-        mcp_tools.delete_relations,
-        mcp_tools.update_relation_type,
-        mcp_tools.get_relations_between,
-        mcp_tools.get_neighborhood,
-        mcp_tools.get_path,
-        mcp_tools.get_orphans,
-        mcp_tools.get_relation_gaps,
-        mcp_tools.find_similar_nodes,
-        mcp_tools.search_nodes,
+        mcp_tools.create_understanding,
+        mcp_tools.get_understandings,
+        mcp_tools.get_understanding_history,
+        mcp_tools.search,
+        mcp_tools.open_intersection,
+        mcp_tools.open_around,
         mcp_tools.get_consolidation_report,
         mcp_tools.get_pending_consolidation,
+        mcp_tools.find_similar_subjects,
+        mcp_tools.merge_subjects,
         mcp_tools.get_stats,
+        mcp_tools.get_status,
     ]
 
     for wrapper in wrappers:
@@ -163,11 +172,11 @@ def test_mcp_wrapper_logs_tool_workspace_and_session(monkeypatch, caplog):
         session_id = "session-123"
 
     monkeypatch.setattr(
-        "memory_mcp.mcp_tools.resolve_effective_workspace_name",
+        "memory_v3.mcp_tools.resolve_effective_workspace_name",
         lambda workspace: "james/gpt",
     )
     monkeypatch.setattr(
-        "memory_mcp.mcp_tools.get_context",
+        "memory_v3.mcp_tools.get_context",
         lambda: FakeContext(),
     )
 
@@ -184,10 +193,11 @@ async def test_get_stats_returns_effective_workspace(monkeypatch):
     class FakeConn:
         async def fetchrow(self, _query, _workspace_id):
             return {
-                "node_count": 0,
+                "subject_count": 0,
                 "observation_count": 0,
-                "relation_count": 0,
+                "understanding_count": 0,
                 "embedding_coverage": None,
+                "current_generation": 0,
             }
 
     class FakeAcquire:
@@ -209,19 +219,19 @@ async def test_get_stats_returns_effective_workspace(monkeypatch):
         return 7
 
     monkeypatch.setattr(
-        "memory_mcp.tools.consolidation.resolve_effective_workspace_name",
+        "memory_v3.tools.resolve_effective_workspace_name",
         lambda workspace: "james/gpt",
     )
     monkeypatch.setattr(
-        "memory_mcp.tools.consolidation.resolve_workspace_id",
+        "memory_v3.tools.resolve_workspace_id",
         fake_resolve_workspace_id,
     )
     monkeypatch.setattr(
-        "memory_mcp.tools.consolidation.get_pool",
+        "memory_v3.tools.get_pool",
         fake_get_pool,
     )
 
-    result = await consolidation.get_stats()
+    result = await tools.get_stats()
 
     assert result["workspace"] == "james/gpt"
 

@@ -35,6 +35,6 @@ asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 
 [project.scripts]
-memory-mcp = "memory_mcp.server:main"
-memory-admin = "memory_mcp.admin_cli:main"
+memory-mcp = "memory_v3.server:main"
+memory-admin = "memory_v3.admin_cli:main"
 memory-admin-v3 = "memory_v3.admin_cli:main"
