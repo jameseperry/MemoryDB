@@ -61,6 +61,14 @@ def embed_query(text: str, instruction: str) -> list[float]:
     return vector[0].tolist()
 
 
+def embed_queries(text: str, instructions: Sequence[str]) -> list[list[float]]:
+    """Embed one retrieval query under multiple perspective instructions."""
+    model = get_model()
+    prefixed = [f"search_query: {instruction} {text}" for instruction in instructions]
+    vectors = model.encode(prefixed, normalize_embeddings=True)
+    return vectors.tolist()
+
+
 async def get_perspectives(
     conn: asyncpg.Connection,
     workspace_id: int,
@@ -158,11 +166,11 @@ async def search_embeddings(
         return []
 
     loop = asyncio.get_event_loop()
-    vectors = await asyncio.gather(
-        *[
-            loop.run_in_executor(None, embed_query, query, perspective["instruction"])
-            for perspective in perspectives
-        ]
+    vectors = await loop.run_in_executor(
+        None,
+        embed_queries,
+        query,
+        [perspective["instruction"] for perspective in perspectives],
     )
 
     candidates: dict[int, dict] = {}
