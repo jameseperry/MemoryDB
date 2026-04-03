@@ -68,7 +68,11 @@ async def _ok(_request):
     return PlainTextResponse("ok")
 
 
-async def _invoke_http_app(app, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
+async def _invoke_http_app(
+    app,
+    headers: dict[str, str] | None = None,
+    query_string: bytes = b"",
+) -> tuple[int, bytes]:
     messages = []
     scope = {
         "type": "http",
@@ -78,7 +82,7 @@ async def _invoke_http_app(app, headers: dict[str, str] | None = None) -> tuple[
         "scheme": "http",
         "path": "/sse",
         "raw_path": b"/sse",
-        "query_string": b"",
+        "query_string": query_string,
         "headers": [
             (k.lower().encode("latin-1"), v.encode("latin-1"))
             for k, v in (headers or {}).items()
@@ -126,6 +130,37 @@ async def test_workspace_header_allows_request():
 
     assert status == 200
     assert body == b"ok"
+
+
+@pytest.mark.asyncio
+async def test_workspace_query_parameter_allows_request():
+    app = Starlette(
+        routes=[Route("/sse", _ok)],
+        middleware=[Middleware(RequireWorkspaceHeaderMiddleware)],
+    )
+    status, body = await _invoke_http_app(
+        app,
+        query_string=b"workspace=james%2Fcodex",
+    )
+
+    assert status == 200
+    assert body == b"ok"
+
+
+@pytest.mark.asyncio
+async def test_workspace_header_and_query_parameter_must_match():
+    app = Starlette(
+        routes=[Route("/sse", _ok)],
+        middleware=[Middleware(RequireWorkspaceHeaderMiddleware)],
+    )
+    status, body = await _invoke_http_app(
+        app,
+        headers={settings.mcp_workspace_header: "james/gpt"},
+        query_string=b"workspace=audrey%2Fclaude",
+    )
+
+    assert status == 400
+    assert b"does not match" in body
 
 
 def test_mcp_wrappers_do_not_expose_workspace():
