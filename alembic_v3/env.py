@@ -9,7 +9,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Pull DATABASE_URL_V3 from environment; alembic_v3.ini leaves sqlalchemy.url blank.
+# Pull DATABASE_URL_V3 from environment; alembic.ini leaves sqlalchemy.url blank.
 database_url = os.environ.get("DATABASE_URL_V3")
 if not database_url:
     raise RuntimeError("DATABASE_URL_V3 environment variable is not set")

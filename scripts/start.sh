@@ -31,7 +31,7 @@ fi
 # --- Run migrations ---
 echo "==> Running v3 migrations..."
 DATABASE_URL_V3="${DATABASE_URL_V3:-postgresql+psycopg2://memory:memory@localhost:5432/memory_v3}" \
-    .venv/bin/alembic -c alembic_v3.ini upgrade head
+    .venv/bin/alembic -c alembic.ini upgrade head
 
 # --- Start the MCP server ---
 echo "==> Starting memory MCP server on port ${MCP_PORT:-8765}..."
