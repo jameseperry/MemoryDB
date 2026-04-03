@@ -11,21 +11,23 @@ if [[ -f .env ]]; then
     set -a; source .env; set +a
 fi
 
+DOCKER_CMD="${DOCKER_CMD:-docker}"
+
 # --- Start Postgres if not already running ---
 echo "==> Starting Postgres..."
-docker compose up -d postgres
+$DOCKER_CMD compose up -d postgres
 
 echo "==> Waiting for Postgres to be ready..."
-until docker compose exec -T postgres pg_isready -U memory -q; do
+until $DOCKER_CMD compose exec -T postgres pg_isready -U memory -q; do
     sleep 1
 done
 echo "    Postgres is ready."
 
 echo "==> Ensuring v3 database exists..."
-if ! docker compose exec -T postgres \
+if ! $DOCKER_CMD compose exec -T postgres \
     psql -U memory -tAc "SELECT 1 FROM pg_database WHERE datname = 'memory_v3'" \
     | grep -q 1; then
-    docker compose exec -T postgres psql -U memory -c "CREATE DATABASE memory_v3"
+    $DOCKER_CMD compose exec -T postgres psql -U memory -c "CREATE DATABASE memory_v3"
 fi
 
 # --- Run migrations ---
