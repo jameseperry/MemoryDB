@@ -1085,6 +1085,21 @@ async def create_understanding(
             effective_session_id,
         )
         subject_rows = await _require_subjects(conn, workspace_id, subject_names)
+        if source_observation_ids:
+            rows = await conn.fetch(
+                """
+                SELECT id
+                FROM observations
+                WHERE workspace_id = $1
+                  AND id = ANY($2)
+                """,
+                workspace_id,
+                source_observation_ids,
+            )
+            found_ids = {row["id"] for row in rows}
+            missing = sorted(set(source_observation_ids) - found_ids)
+            if missing:
+                raise ValueError(f"Observations not found: {missing}")
         generation = await get_workspace_generation(conn, workspace_id)
         effective_kind = kind or ("single_subject" if len(subject_rows) == 1 else "relationship")
         understanding = await _create_understanding_record(

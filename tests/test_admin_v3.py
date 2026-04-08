@@ -11,7 +11,7 @@ from memory_v3.admin import (
     reembed_database,
     set_workspace_document_ids,
 )
-from memory_v3.admin_cli import _workspace_import_progress_total, main
+from memory_v3.admin_cli import _emit_table, _workspace_import_progress_total, main
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -350,7 +350,7 @@ def test_v3_cli_subject_list_text(monkeypatch, capsys):
     assert exit_code == 0
     lines = capsys.readouterr().out.strip().splitlines()
     assert lines[0] == "id  name   summary  single_subject_understanding_id"
-    assert lines[1] == "--  -----  -------  -------------------------------"
+    assert lines[1].startswith("--  -----  -------  ")
     assert lines[2] == "11  James  human"
 
 
@@ -823,3 +823,19 @@ def test_v3_cli_database_reembed_text_progress(monkeypatch, capsys):
     assert ["workspaces_reembedded", "2"] in rows
     assert ["observations_reembedded", "2"] in rows
     assert ["understandings_reembedded", "1"] in rows
+
+
+def test_v3_emit_table_wraps_long_cells(monkeypatch, capsys):
+    monkeypatch.setattr("memory_v3.admin_cli._terminal_width", lambda: 40)
+
+    _emit_table(
+        ["field", "value"],
+        [["summary", "this is a deliberately long value that should wrap"]],
+    )
+
+    output = capsys.readouterr().out.splitlines()
+    assert output[0].startswith("field")
+    assert output[2].startswith("summary")
+    assert any("deliberately" in line for line in output)
+    assert any("should" in line for line in output)
+    assert any(line.strip() == "wrap" for line in output)

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
+import textwrap
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
@@ -103,19 +105,84 @@ def _format_cell(value: Any) -> str:
     return str(value)
 
 
-def _emit_table(headers: list[str], rows: list[list[Any]]) -> None:
-    formatted_rows = [[_format_cell(value) for value in row] for row in rows]
-    widths = [
+def _terminal_width() -> int:
+    return shutil.get_terminal_size(fallback=(120, 24)).columns
+
+
+def _compute_table_widths(headers: list[str], rows: list[list[str]]) -> list[int]:
+    separator_width = 2
+    terminal_width = max(_terminal_width(), 40)
+    natural_widths = [
         max(
             len(header),
-            *(len(row[index]) for row in formatted_rows),
+            *(len(row[index]) for row in rows),
         )
         for index, header in enumerate(headers)
     ]
+    max_column_width = max(
+        24,
+        (terminal_width - separator_width * (len(headers) - 1)) // max(len(headers), 1),
+    )
+    capped_widths = [min(width, max_column_width) for width in natural_widths]
+
+    available_width = terminal_width - separator_width * (len(headers) - 1)
+    minimum_widths = [max(len(header), min(12, available_width)) for header in headers]
+
+    if sum(capped_widths) <= available_width:
+        return capped_widths
+
+    widths = minimum_widths[:]
+    remaining = max(0, available_width - sum(widths))
+    deficits = [max(0, capped - current) for capped, current in zip(capped_widths, widths)]
+
+    while remaining > 0 and any(deficit > 0 for deficit in deficits):
+        index = max(range(len(deficits)), key=lambda idx: deficits[idx])
+        if deficits[index] == 0:
+            break
+        widths[index] += 1
+        deficits[index] -= 1
+        remaining -= 1
+
+    return widths
+
+
+def _wrap_cell(value: str, width: int) -> list[str]:
+    if not value:
+        return [""]
+    wrapped_lines: list[str] = []
+    for raw_line in value.splitlines() or [""]:
+        lines = textwrap.wrap(
+            raw_line,
+            width=width,
+            break_long_words=True,
+            break_on_hyphens=False,
+            drop_whitespace=False,
+            replace_whitespace=False,
+        )
+        wrapped_lines.extend(lines or [""])
+    return wrapped_lines or [""]
+
+
+def _emit_table(headers: list[str], rows: list[list[Any]]) -> None:
+    formatted_rows = [[_format_cell(value) for value in row] for row in rows]
+    widths = _compute_table_widths(headers, formatted_rows)
     click.echo("  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
     click.echo("  ".join("-" * width for width in widths))
     for row in formatted_rows:
-        click.echo("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
+        wrapped_columns = [
+            _wrap_cell(value, widths[index])
+            for index, value in enumerate(row)
+        ]
+        row_height = max(len(lines) for lines in wrapped_columns)
+        for line_index in range(row_height):
+            click.echo(
+                "  ".join(
+                    wrapped_columns[column_index][line_index].ljust(widths[column_index])
+                    if line_index < len(wrapped_columns[column_index])
+                    else " " * widths[column_index]
+                    for column_index in range(len(headers))
+                )
+            )
 
 
 def _run_admin_call(coro):
