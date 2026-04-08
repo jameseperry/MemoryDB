@@ -65,6 +65,8 @@ def test_v3_wrappers_do_not_expose_workspace_or_session():
         mcp_tools.set_workspace_documents,
         mcp_tools.remember,
         mcp_tools.update_understanding,
+        mcp_tools.rewrite_understanding,
+        mcp_tools.delete_understanding,
         mcp_tools.mark_useful,
         mcp_tools.mark_questionable,
         mcp_tools.create_subjects,
@@ -1249,6 +1251,60 @@ async def test_v3_update_understanding_wrapper_uses_new_api(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_v3_rewrite_understanding_wrapper_uses_new_api(monkeypatch):
+    async def fake_rewrite_understanding(
+        understanding_id,
+        new_content,
+        new_summary,
+    ):
+        return {
+            "understanding_id": understanding_id,
+            "new_content": new_content,
+            "new_summary": new_summary,
+        }
+
+    monkeypatch.setattr(
+        "memory_v3.mcp_tools.tools.rewrite_understanding",
+        fake_rewrite_understanding,
+    )
+    monkeypatch.setattr("memory_v3.mcp_tools._log_tool_call", lambda name: None)
+
+    result = await mcp_tools.rewrite_understanding(
+        33,
+        "draft two",
+        "better summary",
+    )
+
+    assert result == {
+        "understanding_id": 33,
+        "new_content": "draft two",
+        "new_summary": "better summary",
+    }
+
+
+@pytest.mark.asyncio
+async def test_v3_delete_understanding_wrapper_uses_new_api(monkeypatch):
+    async def fake_delete_understanding(understanding_id):
+        return {
+            "id": understanding_id,
+            "deleted": True,
+        }
+
+    monkeypatch.setattr(
+        "memory_v3.mcp_tools.tools.delete_understanding",
+        fake_delete_understanding,
+    )
+    monkeypatch.setattr("memory_v3.mcp_tools._log_tool_call", lambda name: None)
+
+    result = await mcp_tools.delete_understanding(33)
+
+    assert result == {
+        "id": 33,
+        "deleted": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_v3_update_understanding_rejects_superseded_understanding(monkeypatch):
     class FakeConn:
         async def fetchval(self, query, *args):
@@ -1314,6 +1370,361 @@ async def test_v3_update_understanding_rejects_superseded_understanding(monkeypa
             "new summary",
             workspace="james/gpt",
         )
+
+
+@pytest.mark.asyncio
+async def test_v3_delete_observations_rejects_already_consolidated(monkeypatch):
+    class FakeConn:
+        async def fetch(self, query, *args):
+            if "SELECT o.id, o.generation, s.session_token AS session_id" in query:
+                assert args == (7, [10])
+                return [
+                    {
+                        "id": 10,
+                        "generation": 2,
+                        "session_id": "conversation-42",
+                    }
+                ]
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            raise AssertionError(f"unexpected execute: {query} {args}")
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_resolve_workspace_id(_conn, workspace):
+        assert workspace == "james/gpt"
+        return 7
+
+    async def fake_get_workspace_generation(_conn, workspace_id):
+        assert workspace_id == 7
+        return 3
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr("memory_v3.tools.resolve_workspace_id", fake_resolve_workspace_id)
+    monkeypatch.setattr("memory_v3.tools.get_workspace_generation", fake_get_workspace_generation)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+
+    result = await tools_module.delete_observations([10], workspace="james/gpt")
+
+    assert result == {
+        "deleted": [],
+        "rejected": [{"id": 10, "reason": "already consolidated"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_v3_rewrite_understanding_updates_in_place(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT u.id, u.kind, u.generation, u.superseded_by, s.session_token AS session_id" in query:
+                assert args == (7, 33)
+                return {
+                    "id": 33,
+                    "kind": "single_subject",
+                    "generation": 4,
+                    "superseded_by": None,
+                    "session_id": "conversation-42",
+                }
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            if "UPDATE records" in query:
+                captured["records_update"] = args
+                return "UPDATE 1"
+            if "UPDATE understanding_records" in query:
+                captured["understanding_update"] = args
+                return "UPDATE 1"
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_resolve_workspace_id(_conn, workspace):
+        assert workspace == "james/gpt"
+        return 7
+
+    async def fake_get_workspace_generation(_conn, workspace_id):
+        assert workspace_id == 7
+        return 4
+
+    async def fake_embed_targets(conn, *, workspace_id, targets):
+        captured["embed_targets"] = (workspace_id, targets)
+
+    async def fake_record_event(conn, *, workspace_id, session_id, operation, detail):
+        captured["event"] = {
+            "workspace_id": workspace_id,
+            "session_id": session_id,
+            "operation": operation,
+            "detail": detail,
+        }
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr("memory_v3.tools.resolve_workspace_id", fake_resolve_workspace_id)
+    monkeypatch.setattr("memory_v3.tools.get_workspace_generation", fake_get_workspace_generation)
+    monkeypatch.setattr("memory_v3.tools.embed_targets", fake_embed_targets)
+    monkeypatch.setattr("memory_v3.tools.record_event", fake_record_event)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+
+    result = await tools_module.rewrite_understanding(
+        33,
+        "draft two",
+        "better summary",
+        workspace="james/gpt",
+    )
+
+    assert result == {
+        "understanding_id": 33,
+        "rewritten": True,
+        "new_content": "draft two",
+        "new_summary": "better summary",
+    }
+    assert captured["records_update"] == (33, 7, "draft two")
+    assert captured["understanding_update"] == (33, 7, "better summary")
+    assert captured["embed_targets"] == (7, [(33, "draft two")])
+    assert captured["event"] == {
+        "workspace_id": 7,
+        "session_id": "conversation-42",
+        "operation": "rewrite_understanding",
+        "detail": {"understanding_id": 33},
+    }
+
+
+@pytest.mark.asyncio
+async def test_v3_rewrite_understanding_rejects_already_consolidated(monkeypatch):
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT u.id, u.kind, u.generation, u.superseded_by, s.session_token AS session_id" in query:
+                assert args == (7, 33)
+                return {
+                    "id": 33,
+                    "kind": "single_subject",
+                    "generation": 1,
+                    "superseded_by": None,
+                    "session_id": "conversation-42",
+                }
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            raise AssertionError(f"unexpected execute: {query} {args}")
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_resolve_workspace_id(_conn, workspace):
+        assert workspace == "james/gpt"
+        return 7
+
+    async def fake_get_workspace_generation(_conn, workspace_id):
+        assert workspace_id == 7
+        return 2
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr("memory_v3.tools.resolve_workspace_id", fake_resolve_workspace_id)
+    monkeypatch.setattr("memory_v3.tools.get_workspace_generation", fake_get_workspace_generation)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Understanding 33 cannot be rewritten: already consolidated",
+    ):
+        await tools_module.rewrite_understanding(
+            33,
+            "draft two",
+            "better summary",
+            workspace="james/gpt",
+        )
+
+
+@pytest.mark.asyncio
+async def test_v3_delete_understanding_deletes_current_session_draft(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT u.id, u.kind, u.generation, u.superseded_by, s.session_token AS session_id" in query:
+                assert args == (7, 33)
+                return {
+                    "id": 33,
+                    "kind": "protocol",
+                    "generation": 4,
+                    "superseded_by": None,
+                    "session_id": "conversation-42",
+                }
+            raise AssertionError(query)
+
+        async def fetchval(self, query, *args):
+            if "SELECT COUNT(*)" in query and "superseded_by = $2" in query:
+                assert args == (7, 33)
+                return 0
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            if "UPDATE subjects" in query:
+                captured["clear_subjects"] = args
+                return "UPDATE 0"
+            if "UPDATE workspaces" in query:
+                captured["clear_workspaces"] = args
+                return "UPDATE 1"
+            if "DELETE FROM understandings" in query:
+                captured["delete"] = args
+                return "DELETE 1"
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_resolve_workspace_id(_conn, workspace):
+        assert workspace == "james/gpt"
+        return 7
+
+    async def fake_get_workspace_generation(_conn, workspace_id):
+        assert workspace_id == 7
+        return 4
+
+    async def fake_record_event(conn, *, workspace_id, session_id, operation, detail):
+        captured["event"] = {
+            "workspace_id": workspace_id,
+            "session_id": session_id,
+            "operation": operation,
+            "detail": detail,
+        }
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr("memory_v3.tools.resolve_workspace_id", fake_resolve_workspace_id)
+    monkeypatch.setattr("memory_v3.tools.get_workspace_generation", fake_get_workspace_generation)
+    monkeypatch.setattr("memory_v3.tools.record_event", fake_record_event)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+
+    result = await tools_module.delete_understanding(33, workspace="james/gpt")
+
+    assert result == {"id": 33, "deleted": True}
+    assert captured["clear_subjects"] == (33,)
+    assert captured["clear_workspaces"] == (33,)
+    assert captured["delete"] == (33,)
+    assert captured["event"] == {
+        "workspace_id": 7,
+        "session_id": "conversation-42",
+        "operation": "delete_understanding",
+        "detail": {"understanding_id": 33},
+    }
+
+
+@pytest.mark.asyncio
+async def test_v3_delete_understanding_rejects_already_consolidated(monkeypatch):
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT u.id, u.kind, u.generation, u.superseded_by, s.session_token AS session_id" in query:
+                assert args == (7, 33)
+                return {
+                    "id": 33,
+                    "kind": "protocol",
+                    "generation": 0,
+                    "superseded_by": None,
+                    "session_id": "conversation-42",
+                }
+            raise AssertionError(query)
+
+        async def fetchval(self, query, *args):
+            raise AssertionError(f"unexpected fetchval: {query} {args}")
+
+        async def execute(self, query, *args):
+            raise AssertionError(f"unexpected execute: {query} {args}")
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_resolve_workspace_id(_conn, workspace):
+        assert workspace == "james/gpt"
+        return 7
+
+    async def fake_get_workspace_generation(_conn, workspace_id):
+        assert workspace_id == 7
+        return 1
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr("memory_v3.tools.resolve_workspace_id", fake_resolve_workspace_id)
+    monkeypatch.setattr("memory_v3.tools.get_workspace_generation", fake_get_workspace_generation)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Understanding 33 cannot be deleted: already consolidated",
+    ):
+        await tools_module.delete_understanding(33, workspace="james/gpt")
 
 
 @pytest.mark.asyncio

@@ -284,6 +284,31 @@ async def update_understanding(
     )
 
 
+async def rewrite_understanding(
+    understanding_id: int,
+    new_content: str,
+    new_summary: str,
+) -> dict:
+    """Rewrite an understanding in place.
+
+    Use this only for same-session correction or iterative drafting before the
+    understanding has been carried forward into a later consolidation generation.
+    Unlike `update_understanding`, this preserves the same understanding ID.
+    """
+    _log_tool_call("rewrite_understanding")
+    return await tools.rewrite_understanding(
+        understanding_id,
+        new_content,
+        new_summary,
+    )
+
+
+async def delete_understanding(understanding_id: int) -> dict:
+    """Delete an understanding written in the current session and generation."""
+    _log_tool_call("delete_understanding")
+    return await tools.delete_understanding(understanding_id)
+
+
 async def mark_useful(id: int) -> dict:
     """Attach a `useful` signal to an active observation or understanding."""
     _log_tool_call("mark_useful")

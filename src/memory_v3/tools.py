@@ -177,6 +177,72 @@ async def _get_observation_links(
     return result
 
 
+def _mutation_rejection_reason(
+    *,
+    row: asyncpg.Record | dict | None,
+    effective_session_id: str,
+    current_generation: int,
+) -> str | None:
+    if row is None:
+        return "not found"
+    if row["session_id"] != effective_session_id:
+        return "session mismatch"
+    if current_generation > row["generation"]:
+        return "already consolidated"
+    return None
+
+
+async def _clear_understanding_pointers(
+    conn: asyncpg.Connection,
+    *,
+    understanding_id: int,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE subjects
+        SET
+            single_subject_understanding_id = CASE
+                WHEN single_subject_understanding_id = $1 THEN NULL
+                ELSE single_subject_understanding_id
+            END,
+            structural_understanding_id = CASE
+                WHEN structural_understanding_id = $1 THEN NULL
+                ELSE structural_understanding_id
+            END
+        WHERE single_subject_understanding_id = $1
+           OR structural_understanding_id = $1
+        """,
+        understanding_id,
+    )
+    await conn.execute(
+        """
+        UPDATE workspaces
+        SET
+            soul_understanding_id = CASE
+                WHEN soul_understanding_id = $1 THEN NULL
+                ELSE soul_understanding_id
+            END,
+            protocol_understanding_id = CASE
+                WHEN protocol_understanding_id = $1 THEN NULL
+                ELSE protocol_understanding_id
+            END,
+            orientation_understanding_id = CASE
+                WHEN orientation_understanding_id = $1 THEN NULL
+                ELSE orientation_understanding_id
+            END,
+            consolidation_understanding_id = CASE
+                WHEN consolidation_understanding_id = $1 THEN NULL
+                ELSE consolidation_understanding_id
+            END
+        WHERE soul_understanding_id = $1
+           OR protocol_understanding_id = $1
+           OR orientation_understanding_id = $1
+           OR consolidation_understanding_id = $1
+        """,
+        understanding_id,
+    )
+
+
 def _split_target_ids(items: list[dict]) -> tuple[list[int], list[int]]:
     observation_ids = [item["id"] for item in items if item["kind"] == "observation"]
     understanding_ids = [item["id"] for item in items if item["kind"] == "understanding"]
@@ -1017,15 +1083,16 @@ async def delete_observations(
     workspace: str | None = None,
     session_id: str | None = None,
 ) -> dict:
-    """Delete observations written in the current session only."""
+    """Delete observations written in the current session and generation only."""
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
+        current_generation = await get_workspace_generation(conn, workspace_id)
         rows = await conn.fetch(
             """
-            SELECT o.id, s.session_token AS session_id
+            SELECT o.id, o.generation, s.session_token AS session_id
             FROM observations o
             LEFT JOIN sessions s ON s.session_id = o.session_id
             WHERE o.workspace_id = $1
@@ -1040,11 +1107,13 @@ async def delete_observations(
 
         for observation_id in ids:
             row = by_id.get(observation_id)
-            if row is None:
-                rejected.append({"id": observation_id, "reason": "not found"})
-                continue
-            if row["session_id"] != effective_session_id:
-                rejected.append({"id": observation_id, "reason": "session mismatch"})
+            rejection_reason = _mutation_rejection_reason(
+                row=row,
+                effective_session_id=effective_session_id,
+                current_generation=current_generation,
+            )
+            if rejection_reason is not None:
+                rejected.append({"id": observation_id, "reason": rejection_reason})
                 continue
             await conn.execute("DELETE FROM observations WHERE id = $1", observation_id)
             deleted.append(observation_id)
@@ -1476,6 +1545,149 @@ async def update_understanding(
         "old_understanding_id": understanding_id,
         "new_understanding_id": new_row["id"],
         "subject_names": [row["name"] for row in subject_rows],
+    }
+
+
+async def delete_understanding(
+    understanding_id: int,
+    workspace: str | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """Delete an active understanding written in the current session and generation."""
+    pool = await get_pool()
+    effective_session_id = resolve_optional_session_id(session_id)
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+        current_generation = await get_workspace_generation(conn, workspace_id)
+        row = await conn.fetchrow(
+            """
+            SELECT u.id, u.kind, u.generation, u.superseded_by, s.session_token AS session_id
+            FROM understandings u
+            LEFT JOIN sessions s ON s.session_id = u.session_id
+            WHERE u.workspace_id = $1
+              AND u.id = $2
+            """,
+            workspace_id,
+            understanding_id,
+        )
+        rejection_reason = _mutation_rejection_reason(
+            row=row,
+            effective_session_id=effective_session_id,
+            current_generation=current_generation,
+        )
+        if rejection_reason is not None:
+            raise ValueError(f"Understanding {understanding_id} cannot be deleted: {rejection_reason}")
+        if row["superseded_by"] is not None:
+            raise ValueError(
+                f"Understanding {understanding_id} is superseded by {row['superseded_by']}"
+            )
+
+        predecessor_count = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM understandings
+            WHERE workspace_id = $1
+              AND superseded_by = $2
+            """,
+            workspace_id,
+            understanding_id,
+        )
+        if predecessor_count:
+            raise ValueError(
+                f"Understanding {understanding_id} cannot be deleted because it has revision history"
+            )
+
+        await _clear_understanding_pointers(conn, understanding_id=understanding_id)
+        await conn.execute("DELETE FROM understandings WHERE id = $1", understanding_id)
+        await record_event(
+            conn,
+            workspace_id=workspace_id,
+            session_id=effective_session_id,
+            operation="delete_understanding",
+            detail={"understanding_id": understanding_id},
+        )
+
+    return {"id": understanding_id, "deleted": True}
+
+
+async def rewrite_understanding(
+    understanding_id: int,
+    new_content: str,
+    new_summary: str,
+    workspace: str | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """Rewrite an active understanding in place within the current session and generation."""
+    pool = await get_pool()
+    effective_session_id = resolve_optional_session_id(session_id)
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+        current_generation = await get_workspace_generation(conn, workspace_id)
+        row = await conn.fetchrow(
+            """
+            SELECT u.id, u.kind, u.generation, u.superseded_by, s.session_token AS session_id
+            FROM understandings u
+            LEFT JOIN sessions s ON s.session_id = u.session_id
+            WHERE u.workspace_id = $1
+              AND u.id = $2
+            """,
+            workspace_id,
+            understanding_id,
+        )
+        rejection_reason = _mutation_rejection_reason(
+            row=row,
+            effective_session_id=effective_session_id,
+            current_generation=current_generation,
+        )
+        if rejection_reason is not None:
+            raise ValueError(f"Understanding {understanding_id} cannot be rewritten: {rejection_reason}")
+        if row["superseded_by"] is not None:
+            raise ValueError(
+                f"Understanding {understanding_id} is superseded by {row['superseded_by']}"
+            )
+
+        await conn.execute(
+            """
+            UPDATE records
+            SET content = $3
+            WHERE id = $1
+              AND workspace_id = $2
+            """,
+            understanding_id,
+            workspace_id,
+            new_content,
+        )
+        await conn.execute(
+            """
+            UPDATE understanding_records
+            SET summary = $3
+            WHERE id = $1
+              AND workspace_id = $2
+            """,
+            understanding_id,
+            workspace_id,
+            new_summary,
+        )
+        await embed_targets(
+            conn,
+            workspace_id=workspace_id,
+            targets=[(understanding_id, new_content)],
+        )
+        await record_event(
+            conn,
+            workspace_id=workspace_id,
+            session_id=effective_session_id,
+            operation="rewrite_understanding",
+            detail={"understanding_id": understanding_id},
+        )
+
+    return {
+        "understanding_id": understanding_id,
+        "rewritten": True,
+        "new_content": new_content,
+        "new_summary": new_summary,
     }
 
 async def _search_text(

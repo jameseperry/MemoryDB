@@ -48,6 +48,8 @@ def create_mcp_server() -> FastMCP:
     mcp.add_tool(mcp_tools.set_workspace_documents)
     mcp.add_tool(mcp_tools.remember)
     mcp.add_tool(mcp_tools.update_understanding)
+    mcp.add_tool(mcp_tools.rewrite_understanding)
+    mcp.add_tool(mcp_tools.delete_understanding)
     mcp.add_tool(mcp_tools.mark_useful)
     mcp.add_tool(mcp_tools.mark_questionable)
     mcp.add_tool(mcp_tools.create_subjects)
