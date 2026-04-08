@@ -58,16 +58,20 @@ async def _run_with_pool(coro):
         await close_pool()
 
 
-def _emit_result(result, as_json: bool) -> None:
+def _emit_result(result, as_json: bool, wrap: bool = True) -> None:
     if as_json:
         click.echo(json.dumps(result, default=_json_default))
         return
-    _emit_text_result(result)
+    _emit_text_result(result, wrap=wrap)
 
 
-def _emit_text_result(result: Any) -> None:
+def _emit_text_result(result: Any, wrap: bool = True) -> None:
     if isinstance(result, dict):
-        _emit_table(["field", "value"], [[key, value] for key, value in result.items()])
+        _emit_table(
+            ["field", "value"],
+            [[key, value] for key, value in result.items()],
+            wrap=wrap,
+        )
         return
     if isinstance(result, list):
         if not result:
@@ -75,9 +79,9 @@ def _emit_text_result(result: Any) -> None:
         if all(isinstance(item, dict) for item in result):
             headers = _collect_headers(result)
             rows = [[item.get(header) for header in headers] for item in result]
-            _emit_table(headers, rows)
+            _emit_table(headers, rows, wrap=wrap)
             return
-        _emit_table(["value"], [[item] for item in result])
+        _emit_table(["value"], [[item] for item in result], wrap=wrap)
         return
     click.echo(str(result))
 
@@ -163,16 +167,27 @@ def _wrap_cell(value: str, width: int) -> list[str]:
     return wrapped_lines or [""]
 
 
-def _emit_table(headers: list[str], rows: list[list[Any]]) -> None:
+def _emit_table(headers: list[str], rows: list[list[Any]], wrap: bool = True) -> None:
     formatted_rows = [[_format_cell(value) for value in row] for row in rows]
-    widths = _compute_table_widths(headers, formatted_rows)
+    widths = (
+        _compute_table_widths(headers, formatted_rows)
+        if wrap
+        else [
+            max(
+                len(header),
+                *(len(row[index]) for row in formatted_rows),
+            )
+            for index, header in enumerate(headers)
+        ]
+    )
     click.echo("  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
     click.echo("  ".join("-" * width for width in widths))
     for row in formatted_rows:
-        wrapped_columns = [
-            _wrap_cell(value, widths[index])
-            for index, value in enumerate(row)
-        ]
+        wrapped_columns = (
+            [_wrap_cell(value, widths[index]) for index, value in enumerate(row)]
+            if wrap
+            else [[value] for value in row]
+        )
         row_height = max(len(lines) for lines in wrapped_columns)
         for line_index in range(row_height):
             click.echo(
@@ -197,18 +212,20 @@ def _workspace_import_progress_total(path: str) -> int:
     return len(observations) + len(understandings)
 
 
-def _print_and_exit_on_missing(result: dict, as_json: bool) -> None:
-    _emit_result(result, as_json)
+def _print_and_exit_on_missing(result: dict, as_json: bool, wrap: bool = True) -> None:
+    _emit_result(result, as_json, wrap=wrap)
     if not result["deleted"]:
         raise click.exceptions.Exit(1)
 
 
 @click.group()
 @click.option("--json", "as_json", is_flag=True, help="Output JSON.")
+@click.option("--no-wrap", is_flag=True, help="Disable table cell wrapping.")
 @click.pass_context
-def cli(ctx: click.Context, as_json: bool) -> None:
+def cli(ctx: click.Context, as_json: bool, no_wrap: bool) -> None:
     ctx.ensure_object(dict)
     ctx.obj["as_json"] = as_json
+    ctx.obj["wrap"] = not no_wrap
 
 
 @cli.group()
@@ -220,8 +237,9 @@ def workspace() -> None:
 @click.pass_context
 def workspace_list(ctx: click.Context) -> None:
     as_json = ctx.find_root().obj["as_json"]
+    wrap = ctx.find_root().obj["wrap"]
     result = _run_admin_call(list_workspaces())
-    _emit_result(result, as_json)
+    _emit_result(result, as_json, wrap=wrap)
 
 
 @workspace.command("create")
@@ -229,17 +247,18 @@ def workspace_list(ctx: click.Context) -> None:
 @click.pass_context
 def workspace_create(ctx: click.Context, name: str) -> None:
     result = _run_admin_call(create_workspace(name))
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 def _delete_workspace_command(ctx: click.Context, name: str) -> None:
     as_json = ctx.find_root().obj["as_json"]
+    wrap = ctx.find_root().obj["wrap"]
     result = _run_admin_call(delete_workspace(name))
     if result["deleted"]:
-        _emit_result(result, as_json)
+        _emit_result(result, as_json, wrap=wrap)
         return
     if as_json:
-        _print_and_exit_on_missing(result, as_json=True)
+        _print_and_exit_on_missing(result, as_json=True, wrap=wrap)
     click.echo(f"workspace not found: {result['name']}", err=True)
     raise click.exceptions.Exit(1)
 
@@ -280,6 +299,7 @@ def workspace_set_documents(
     protocol_id: int | None,
     orientation_id: int | None,
 ) -> None:
+    wrap = ctx.find_root().obj["wrap"]
     result = _run_admin_call(
         set_workspace_document_ids(
             name,
@@ -288,7 +308,7 @@ def workspace_set_documents(
             orientation_id=orientation_id,
         )
     )
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=wrap)
 
 
 @workspace.command("reset")
@@ -306,7 +326,7 @@ def workspace_reset(ctx: click.Context, name: str, yes: bool) -> None:
             abort=True,
         )
     result = _run_admin_call(reset_workspace(name))
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @workspace.command("export")
@@ -315,7 +335,7 @@ def workspace_reset(ctx: click.Context, name: str, yes: bool) -> None:
 @click.pass_context
 def workspace_export(ctx: click.Context, name: str, path: str) -> None:
     result = _run_admin_call(export_workspace(name, path))
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @workspace.command("import")
@@ -333,9 +353,10 @@ def workspace_import(
     workspace_name: str | None,
 ) -> None:
     as_json = ctx.find_root().obj["as_json"]
+    wrap = ctx.find_root().obj["wrap"]
     if as_json:
         result = _run_admin_call(import_workspace(path, name=workspace_name))
-        _emit_result(result, as_json)
+        _emit_result(result, as_json, wrap=wrap)
         return
 
     click.echo("Importing workspace records")
@@ -355,7 +376,7 @@ def workspace_import(
                 progress=update_progress,
             )
         )
-    _emit_result(result, as_json)
+    _emit_result(result, as_json, wrap=wrap)
 
 
 @cli.group()
@@ -369,7 +390,7 @@ def subject() -> None:
 @click.pass_context
 def subject_list(ctx: click.Context, workspace: str, limit: int) -> None:
     result = _run_admin_call(list_subjects(workspace, limit=limit))
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @subject.command("create")
@@ -388,7 +409,7 @@ def subject_create(
     result = _run_admin_call(
         create_subject(workspace, name, summary=summary, tags=list(tags))
     )
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @subject.command("show")
@@ -397,7 +418,7 @@ def subject_create(
 @click.pass_context
 def subject_show(ctx: click.Context, workspace: str, name: str) -> None:
     result = _run_admin_call(show_subject(workspace, name))
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @subject.command("delete")
@@ -406,12 +427,13 @@ def subject_show(ctx: click.Context, workspace: str, name: str) -> None:
 @click.pass_context
 def subject_delete(ctx: click.Context, workspace: str, name: str) -> None:
     as_json = ctx.find_root().obj["as_json"]
+    wrap = ctx.find_root().obj["wrap"]
     result = _run_admin_call(delete_subject(workspace, name))
     if result["deleted"]:
-        _emit_result(result, as_json)
+        _emit_result(result, as_json, wrap=wrap)
         return
     if as_json:
-        _print_and_exit_on_missing(result, as_json=True)
+        _print_and_exit_on_missing(result, as_json=True, wrap=wrap)
     click.echo(f"subject not found: {name}", err=True)
     raise click.exceptions.Exit(1)
 
@@ -435,7 +457,7 @@ def observation_list(
     result = _run_admin_call(
         list_observations(workspace, subject_name=subject_name, limit=limit)
     )
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @observation.command("create")
@@ -468,7 +490,7 @@ def observation_create(
             session_id=session_id,
         )
     )
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @observation.command("show")
@@ -481,7 +503,7 @@ def observation_show(
     observation_id: int,
 ) -> None:
     result = _run_admin_call(show_observation(workspace, observation_id))
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @observation.command("delete")
@@ -494,12 +516,13 @@ def observation_delete(
     observation_id: int,
 ) -> None:
     as_json = ctx.find_root().obj["as_json"]
+    wrap = ctx.find_root().obj["wrap"]
     result = _run_admin_call(delete_observation(workspace, observation_id))
     if result["deleted"]:
-        _emit_result(result, as_json)
+        _emit_result(result, as_json, wrap=wrap)
         return
     if as_json:
-        _print_and_exit_on_missing(result, as_json=True)
+        _print_and_exit_on_missing(result, as_json=True, wrap=wrap)
     click.echo(f"observation not found: {observation_id}", err=True)
     raise click.exceptions.Exit(1)
 
@@ -533,7 +556,7 @@ def understanding_list(
             limit=limit,
         )
     )
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @understanding.command("create")
@@ -569,7 +592,7 @@ def understanding_create(
             session_id=session_id,
         )
     )
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @understanding.command("show")
@@ -582,7 +605,7 @@ def understanding_show(
     understanding_id: int,
 ) -> None:
     result = _run_admin_call(show_understanding(workspace, understanding_id))
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @understanding.command("delete")
@@ -595,12 +618,13 @@ def understanding_delete(
     understanding_id: int,
 ) -> None:
     as_json = ctx.find_root().obj["as_json"]
+    wrap = ctx.find_root().obj["wrap"]
     result = _run_admin_call(delete_understanding(workspace, understanding_id))
     if result["deleted"]:
-        _emit_result(result, as_json)
+        _emit_result(result, as_json, wrap=wrap)
         return
     if as_json:
-        _print_and_exit_on_missing(result, as_json=True)
+        _print_and_exit_on_missing(result, as_json=True, wrap=wrap)
     click.echo(f"understanding not found: {understanding_id}", err=True)
     raise click.exceptions.Exit(1)
 
@@ -616,7 +640,7 @@ def event() -> None:
 @click.pass_context
 def event_list(ctx: click.Context, workspace: str, limit: int) -> None:
     result = _run_admin_call(list_events(workspace, limit=limit))
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @cli.group("utility-signal")
@@ -630,7 +654,7 @@ def utility_signal() -> None:
 @click.pass_context
 def utility_signal_list(ctx: click.Context, workspace: str, limit: int) -> None:
     result = _run_admin_call(list_utility_signals(workspace, limit=limit))
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @cli.group()
@@ -654,7 +678,7 @@ def perspective_list(
     result = _run_admin_call(
         list_perspectives(workspace, include_global=not exclude_global)
     )
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @cli.group()
@@ -674,7 +698,7 @@ def database() -> None:
 @click.pass_context
 def database_backup(ctx: click.Context, path: str, method: str) -> None:
     result = backup_database(path, method=method)
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @database.command("restore")
@@ -699,16 +723,17 @@ def database_restore(ctx: click.Context, path: str, method: str, yes: bool) -> N
             abort=True,
         )
     result = restore_database(path, method=method)
-    _emit_result(result, ctx.find_root().obj["as_json"])
+    _emit_result(result, ctx.find_root().obj["as_json"], wrap=ctx.find_root().obj["wrap"])
 
 
 @database.command("reembed")
 @click.pass_context
 def database_reembed(ctx: click.Context) -> None:
     as_json = ctx.find_root().obj["as_json"]
+    wrap = ctx.find_root().obj["wrap"]
     if as_json:
         result = _run_admin_call(reembed_database())
-        _emit_result(result, as_json)
+        _emit_result(result, as_json, wrap=wrap)
         return
 
     total = _run_admin_call(count_reembed_targets())
@@ -718,7 +743,7 @@ def database_reembed(ctx: click.Context) -> None:
                 progress=lambda _label, advance: bar.update(advance),
             )
         )
-    _emit_result(result, as_json)
+    _emit_result(result, as_json, wrap=wrap)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

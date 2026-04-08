@@ -839,3 +839,49 @@ def test_v3_emit_table_wraps_long_cells(monkeypatch, capsys):
     assert any("deliberately" in line for line in output)
     assert any("should" in line for line in output)
     assert any(line.strip() == "wrap" for line in output)
+
+
+def test_v3_emit_table_no_wrap_keeps_long_cells_on_one_line(monkeypatch, capsys):
+    monkeypatch.setattr("memory_v3.admin_cli._terminal_width", lambda: 40)
+
+    _emit_table(
+        ["field", "value"],
+        [["summary", "this is a deliberately long value that should wrap"]],
+        wrap=False,
+    )
+
+    output = capsys.readouterr().out.splitlines()
+    assert output[2] == "summary  this is a deliberately long value that should wrap"
+
+
+def test_v3_cli_no_wrap_disables_wrapping(monkeypatch, capsys):
+    async def fake_init_pool():
+        return None
+
+    async def fake_close_pool():
+        return None
+
+    async def fake_list_subjects(workspace: str, limit: int = 100):
+        assert workspace == "alpha"
+        return [
+            {
+                "id": 11,
+                "name": "James",
+                "summary": "this is a deliberately long value that should wrap",
+                "single_subject_understanding_id": None,
+            }
+        ]
+
+    monkeypatch.setattr("memory_v3.admin_cli._terminal_width", lambda: 40)
+    monkeypatch.setattr("memory_v3.admin_cli.init_pool", fake_init_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.close_pool", fake_close_pool)
+    monkeypatch.setattr("memory_v3.admin_cli.list_subjects", fake_list_subjects)
+
+    exit_code = main(["--no-wrap", "subject", "list", "alpha"])
+
+    output = capsys.readouterr().out.splitlines()
+    assert exit_code == 0
+    assert any(
+        line.startswith("11  James  this is a deliberately long value that should wrap")
+        for line in output
+    )
