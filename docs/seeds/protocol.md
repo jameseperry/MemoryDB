@@ -18,23 +18,15 @@ write, providing session provenance.
 
 ## Live Retrieval
 
-Prefer Layer 2 tools during live work:
+Prefer Layer 2 tools (`bring_to_mind`, `recall`, `remember`, `update_understanding`)
+during live work. Use Layer 1 tools (`get_subjects`, `get_understandings`,
+`open_intersection`, etc.) when the Layer 2 verbs are not sufficient.
 
-| Verb | Use when |
-|---|---|
-| `bring_to_mind(topic)` | You may not know what prior context exists |
-| `recall(subject_or_question)` | You know what you are trying to answer |
-| `remember(subject_names, content)` | Recording a new observation |
-| `update_understanding(id, content)` | Revising a synthesis |
+### bring_to_mind — use proactively
 
-Use Layer 1 tools (`get_subjects`, `get_understandings`, `open_intersection`, etc.)
-when the Layer 2 verbs are not sufficient.
-
-### bring_to_mind — proactive surfacing
-
-Use proactively before decisions that could be informed by prior context. Do not wait
-for certainty that memory is relevant — if unseen prior context could plausibly change
-the right move, retrieve it.
+Use `bring_to_mind` before decisions that could be informed by prior context. Do not
+wait for certainty that memory is relevant — if unseen prior context could plausibly
+change the right move, retrieve it.
 
 Natural checkpoints:
 - Topic shifts into a domain with likely prior history
@@ -50,14 +42,6 @@ hidden context that could matter:
 
 Do not write narrow factual questions. Treat surfaced results as suggestions requiring
 judgment, not authoritative answers.
-
-### recall — directed retrieval
-
-`recall(subject_name)` returns a subject-centered bundle: metadata, active
-understanding, structural understanding, recent observations.
-
-`recall(question)` treats input as a natural-language question and returns a best-answer
-view built from search. Use this when you don't know the right subject name.
 
 ---
 
