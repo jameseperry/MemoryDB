@@ -2127,6 +2127,32 @@ async def orient(
                 "subjects_with_new_understandings": [row["name"] for row in und_rows],
             }
 
+        last_consolidation_event = None
+        if mode == "consolidation":
+            event_row = await conn.fetchrow(
+                """
+                SELECT e.timestamp, e.detail, s.session_token
+                FROM events e
+                LEFT JOIN sessions s ON s.session_id = e.session_id
+                WHERE e.workspace_id = $1
+                  AND e.operation = 'finalize_consolidation'
+                ORDER BY e.timestamp DESC, e.id DESC
+                LIMIT 1
+                """,
+                workspace_id,
+            )
+            if event_row is not None:
+                detail = event_row["detail"] or {}
+                last_consolidation_event = {
+                    "timestamp": event_row["timestamp"].isoformat(),
+                    "summary": detail.get("summary"),
+                    "expected_generation": detail.get("expected_generation"),
+                    "new_generation": detail.get("new_generation"),
+                    "updated_understanding_ids": detail.get("updated_understanding_ids", []),
+                    "created_understanding_ids": detail.get("created_understanding_ids", []),
+                    "session_id": event_row["session_token"],
+                }
+
         await record_event(
             conn,
             workspace_id=workspace_id,
@@ -2185,12 +2211,82 @@ async def orient(
                 ),
             ),
             "orientation": orientation_payload,
+            "last_consolidation_event": last_consolidation_event,
         }
 
     return {
         **documents,
         "pending_consolidation_count": pending_subjects or 0,
         "recent_activity": recent_activity,
+    }
+
+
+async def finalize_consolidation(
+    expected_generation: int,
+    summary: str,
+    updated_understanding_ids: list[int] | None = None,
+    created_understanding_ids: list[int] | None = None,
+    workspace: str | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """Finalize a consolidation pass by advancing the workspace generation."""
+    pool = await get_pool()
+    effective_session_id = resolve_optional_session_id(session_id)
+    normalized_summary = summary.strip()
+    if not normalized_summary:
+        raise ValueError("summary is required")
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+        current_generation = await get_workspace_generation(conn, workspace_id)
+        if current_generation != expected_generation:
+            raise ValueError(
+                "Consolidation generation mismatch: "
+                f"expected {expected_generation}, current {current_generation}"
+            )
+
+        row = await conn.fetchrow(
+            """
+            UPDATE workspaces
+            SET
+                current_generation = current_generation + 1,
+                last_consolidated_at = NOW()
+            WHERE id = $1
+              AND current_generation = $2
+            RETURNING current_generation, last_consolidated_at
+            """,
+            workspace_id,
+            expected_generation,
+        )
+        if row is None:
+            latest_generation = await get_workspace_generation(conn, workspace_id)
+            raise ValueError(
+                "Consolidation generation mismatch: "
+                f"expected {expected_generation}, current {latest_generation}"
+            )
+
+        detail = {
+            "summary": normalized_summary,
+            "expected_generation": expected_generation,
+            "new_generation": row["current_generation"],
+            "updated_understanding_ids": sorted(updated_understanding_ids or []),
+            "created_understanding_ids": sorted(created_understanding_ids or []),
+        }
+        await record_event(
+            conn,
+            workspace_id=workspace_id,
+            session_id=effective_session_id,
+            operation="finalize_consolidation",
+            detail=detail,
+        )
+
+    return {
+        "summary": normalized_summary,
+        "expected_generation": expected_generation,
+        "new_generation": row["current_generation"],
+        "updated_understanding_ids": detail["updated_understanding_ids"],
+        "created_understanding_ids": detail["created_understanding_ids"],
+        "last_consolidated_at": row["last_consolidated_at"].isoformat(),
     }
 
 

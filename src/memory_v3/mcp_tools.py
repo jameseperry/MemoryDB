@@ -284,6 +284,28 @@ async def update_understanding(
     )
 
 
+async def finalize_consolidation(
+    expected_generation: int,
+    summary: str,
+    updated_understanding_ids: list[int] | None = None,
+    created_understanding_ids: list[int] | None = None,
+) -> dict:
+    """Finalize a consolidation pass and advance the workspace generation.
+
+    Use this at the end of a maintenance pass after writing any new or updated
+    understandings for the current generation. The call is optimistic-concurrency
+    guarded by `expected_generation`, so it fails cleanly if another pass already
+    advanced the workspace.
+    """
+    _log_tool_call("finalize_consolidation")
+    return await tools.finalize_consolidation(
+        expected_generation,
+        summary,
+        updated_understanding_ids=updated_understanding_ids,
+        created_understanding_ids=created_understanding_ids,
+    )
+
+
 async def rewrite_understanding(
     understanding_id: int,
     new_content: str,

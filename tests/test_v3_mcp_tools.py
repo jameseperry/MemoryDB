@@ -65,6 +65,7 @@ def test_v3_wrappers_do_not_expose_workspace_or_session():
         mcp_tools.set_workspace_documents,
         mcp_tools.remember,
         mcp_tools.update_understanding,
+        mcp_tools.finalize_consolidation,
         mcp_tools.rewrite_understanding,
         mcp_tools.delete_understanding,
         mcp_tools.mark_useful,
@@ -1251,6 +1252,42 @@ async def test_v3_update_understanding_wrapper_uses_new_api(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_v3_finalize_consolidation_wrapper_uses_new_api(monkeypatch):
+    async def fake_finalize_consolidation(
+        expected_generation,
+        summary,
+        updated_understanding_ids=None,
+        created_understanding_ids=None,
+    ):
+        return {
+            "expected_generation": expected_generation,
+            "summary": summary,
+            "updated_understanding_ids": updated_understanding_ids,
+            "created_understanding_ids": created_understanding_ids,
+        }
+
+    monkeypatch.setattr(
+        "memory_v3.mcp_tools.tools.finalize_consolidation",
+        fake_finalize_consolidation,
+    )
+    monkeypatch.setattr("memory_v3.mcp_tools._log_tool_call", lambda name: None)
+
+    result = await mcp_tools.finalize_consolidation(
+        3,
+        "Consolidated test subject",
+        updated_understanding_ids=[10],
+        created_understanding_ids=[11],
+    )
+
+    assert result == {
+        "expected_generation": 3,
+        "summary": "Consolidated test subject",
+        "updated_understanding_ids": [10],
+        "created_understanding_ids": [11],
+    }
+
+
+@pytest.mark.asyncio
 async def test_v3_rewrite_understanding_wrapper_uses_new_api(monkeypatch):
     async def fake_rewrite_understanding(
         understanding_id,
@@ -2124,6 +2161,19 @@ async def test_v3_orient_consolidation_mode_returns_consolidation_document(monke
                 return {"model_tier": "gpt-5.4"}
             if "INSERT INTO sessions" in query and "RETURNING session_id" in query:
                 return {"session_id": 99}
+            if "FROM events e" in query and "finalize_consolidation" in query:
+                assert args == (7,)
+                return {
+                    "timestamp": datetime(2026, 4, 8, 17, 55, tzinfo=timezone.utc),
+                    "detail": {
+                        "summary": "Consolidated validation subject",
+                        "expected_generation": 2,
+                        "new_generation": 3,
+                        "updated_understanding_ids": [40],
+                        "created_understanding_ids": [41],
+                    },
+                    "session_token": "conversation-41",
+                }
             raise AssertionError(query)
 
         async def execute(self, query, *args):
@@ -2210,8 +2260,152 @@ async def test_v3_orient_consolidation_mode_returns_consolidation_document(monke
         mode="consolidation",
     )
 
-    assert list(result.keys())[:3] == ["soul", "consolidation", "orientation"]
+    assert list(result.keys())[:4] == [
+        "soul",
+        "consolidation",
+        "orientation",
+        "last_consolidation_event",
+    ]
     assert result["soul"]["content"] == "soul content"
     assert result["consolidation"]["content"] == "consolidation content"
     assert result["orientation"]["content"] == "orientation content"
+    assert result["last_consolidation_event"] == {
+        "timestamp": "2026-04-08T17:55:00+00:00",
+        "summary": "Consolidated validation subject",
+        "expected_generation": 2,
+        "new_generation": 3,
+        "updated_understanding_ids": [40],
+        "created_understanding_ids": [41],
+        "session_id": "conversation-41",
+    }
     assert "protocol" not in result
+
+
+@pytest.mark.asyncio
+async def test_v3_finalize_consolidation_advances_generation_and_records_event(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "UPDATE workspaces" in query and "RETURNING current_generation, last_consolidated_at" in query:
+                assert args == (7, 3)
+                return {
+                    "current_generation": 4,
+                    "last_consolidated_at": datetime(2026, 4, 8, 18, 0, tzinfo=timezone.utc),
+                }
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_resolve_workspace_id(_conn, workspace):
+        assert workspace == "james/gpt"
+        return 7
+
+    async def fake_get_workspace_generation(_conn, workspace_id):
+        assert workspace_id == 7
+        return 3
+
+    async def fake_record_event(conn, *, workspace_id, session_id, operation, detail):
+        captured["event"] = {
+            "workspace_id": workspace_id,
+            "session_id": session_id,
+            "operation": operation,
+            "detail": detail,
+        }
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr("memory_v3.tools.resolve_workspace_id", fake_resolve_workspace_id)
+    monkeypatch.setattr("memory_v3.tools.get_workspace_generation", fake_get_workspace_generation)
+    monkeypatch.setattr("memory_v3.tools.record_event", fake_record_event)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+
+    result = await tools_module.finalize_consolidation(
+        3,
+        "Consolidated memory_system_v3",
+        updated_understanding_ids=[12],
+        created_understanding_ids=[13, 14],
+        workspace="james/gpt",
+    )
+
+    assert result == {
+        "summary": "Consolidated memory_system_v3",
+        "expected_generation": 3,
+        "new_generation": 4,
+        "updated_understanding_ids": [12],
+        "created_understanding_ids": [13, 14],
+        "last_consolidated_at": "2026-04-08T18:00:00+00:00",
+    }
+    assert captured["event"] == {
+        "workspace_id": 7,
+        "session_id": "conversation-42",
+        "operation": "finalize_consolidation",
+        "detail": {
+            "summary": "Consolidated memory_system_v3",
+            "expected_generation": 3,
+            "new_generation": 4,
+            "updated_understanding_ids": [12],
+            "created_understanding_ids": [13, 14],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_v3_finalize_consolidation_rejects_generation_mismatch(monkeypatch):
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            raise AssertionError(f"unexpected fetchrow: {query} {args}")
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_resolve_workspace_id(_conn, workspace):
+        assert workspace == "james/gpt"
+        return 7
+
+    async def fake_get_workspace_generation(_conn, workspace_id):
+        assert workspace_id == 7
+        return 4
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr("memory_v3.tools.resolve_workspace_id", fake_resolve_workspace_id)
+    monkeypatch.setattr("memory_v3.tools.get_workspace_generation", fake_get_workspace_generation)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Consolidation generation mismatch: expected 3, current 4",
+    ):
+        await tools_module.finalize_consolidation(
+            3,
+            "Consolidated memory_system_v3",
+            workspace="james/gpt",
+        )

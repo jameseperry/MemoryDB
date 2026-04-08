@@ -174,6 +174,7 @@ def test_mcp_wrappers_do_not_expose_workspace():
         mcp_tools.set_workspace_documents,
         mcp_tools.remember,
         mcp_tools.update_understanding,
+        mcp_tools.finalize_consolidation,
         mcp_tools.rewrite_understanding,
         mcp_tools.delete_understanding,
         mcp_tools.mark_useful,
