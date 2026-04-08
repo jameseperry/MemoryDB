@@ -38,3 +38,4 @@ testpaths = ["tests"]
 memory-mcp = "memory_v3.server:main"
 memory-admin = "memory_v3.admin_cli:main"
 memory-admin-v3 = "memory_v3.admin_cli:main"
+memory-mcp-cli = "memory_v3.mcp_cli:main"

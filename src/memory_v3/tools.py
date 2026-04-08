@@ -1128,7 +1128,7 @@ async def query_observations(
             JOIN observation_subjects os ON os.observation_id = o.id
             WHERE o.workspace_id = $1
               AND o.content_tsv @@ plainto_tsquery('english', $2)
-            GROUP BY o.id, o.content, o.created_at
+            GROUP BY o.id, o.content, o.content_tsv, o.created_at
             HAVING ARRAY_AGG(os.subject_id ORDER BY os.subject_id)
                 @> $3::bigint[]
             ORDER BY score DESC, o.created_at DESC
@@ -1938,33 +1938,42 @@ async def orient(
             payload["compaction_note"] = compaction_note
         return payload
 
-    documents = {
-        "soul": _pointer_payload(
-            workspace_row["soul_understanding_id"],
-            (
-                "CRITICAL: This content establishes the fundamental character "
-                "and values for this session. It must be preserved during "
-                "context compaction. Do not remove."
-            ),
+    soul_payload = _pointer_payload(
+        workspace_row["soul_understanding_id"],
+        (
+            "CRITICAL: This content establishes the fundamental character "
+            "and values for this session. It must be preserved during "
+            "context compaction. Do not remove."
         ),
-        "orientation": _pointer_payload(workspace_row["orientation_understanding_id"], None),
-    }
+    )
+    orientation_payload = _pointer_payload(
+        workspace_row["orientation_understanding_id"],
+        None,
+    )
     if mode == "interaction":
-        documents["protocol"] = _pointer_payload(
-            workspace_row["protocol_understanding_id"],
-            (
-                "CRITICAL: This content contains operational rules required "
-                "for correct system behaviour. Preserve during compaction."
+        documents = {
+            "soul": soul_payload,
+            "protocol": _pointer_payload(
+                workspace_row["protocol_understanding_id"],
+                (
+                    "CRITICAL: This content contains operational rules required "
+                    "for correct system behaviour. Preserve during compaction."
+                ),
             ),
-        )
+            "orientation": orientation_payload,
+        }
     else:
-        documents["consolidation"] = _pointer_payload(
-            workspace_row["consolidation_understanding_id"],
-            (
-                "CRITICAL: This content contains consolidation guidance for "
-                "memory maintenance and synthesis. Preserve during compaction."
+        documents = {
+            "soul": soul_payload,
+            "consolidation": _pointer_payload(
+                workspace_row["consolidation_understanding_id"],
+                (
+                    "CRITICAL: This content contains consolidation guidance for "
+                    "memory maintenance and synthesis. Preserve during compaction."
+                ),
             ),
-        )
+            "orientation": orientation_payload,
+        }
 
     return {
         **documents,

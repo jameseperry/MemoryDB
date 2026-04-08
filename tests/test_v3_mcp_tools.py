@@ -921,6 +921,59 @@ async def test_v3_query_observations_embedding_mode_filters_semantic_hits_by_sub
 
 
 @pytest.mark.asyncio
+async def test_v3_query_observations_text_mode_groups_by_content_tsv(monkeypatch):
+    captured = {}
+
+    class FakeConn:
+        async def fetch(self, query, *args):
+            if "ts_rank(o.content_tsv" in query:
+                captured["query"] = query
+                assert args == (7, "relationship understanding", [101])
+                return []
+            if "FROM observation_links" in query:
+                assert args == ([],)
+                return []
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_resolve_workspace_id(_conn, workspace):
+        assert workspace == "james/gpt"
+        return 7
+
+    async def fake_require_subjects(_conn, workspace_id, subject_names):
+        assert workspace_id == 7
+        assert subject_names == ["memory_system_v3"]
+        return [{"id": 101, "name": "memory_system_v3"}]
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr("memory_v3.tools.resolve_workspace_id", fake_resolve_workspace_id)
+    monkeypatch.setattr("memory_v3.tools._require_subjects", fake_require_subjects)
+
+    result = await tools_module.query_observations(
+        ["memory_system_v3"],
+        "relationship understanding",
+        mode="text",
+        workspace="james/gpt",
+    )
+
+    assert result == []
+    assert "GROUP BY o.id, o.content, o.content_tsv, o.created_at" in captured["query"]
+
+
+@pytest.mark.asyncio
 async def test_v3_get_understanding_history_walks_back_from_current_head(monkeypatch):
     stamp_old = datetime(2026, 4, 1, tzinfo=timezone.utc)
     stamp_new = datetime(2026, 4, 2, tzinfo=timezone.utc)
@@ -1746,6 +1799,7 @@ async def test_v3_orient_consolidation_mode_returns_consolidation_document(monke
         mode="consolidation",
     )
 
+    assert list(result.keys())[:3] == ["soul", "consolidation", "orientation"]
     assert result["soul"]["content"] == "soul content"
     assert result["consolidation"]["content"] == "consolidation content"
     assert result["orientation"]["content"] == "orientation content"
