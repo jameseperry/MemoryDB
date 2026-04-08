@@ -203,7 +203,9 @@ def test_mcp_wrappers_do_not_expose_workspace():
     ]
 
     for wrapper in wrappers:
-        assert "workspace" not in inspect.signature(wrapper).parameters
+        parameters = inspect.signature(wrapper).parameters
+        assert "workspace" not in parameters
+        assert "readonly" not in parameters
 
 
 def test_mcp_wrapper_logs_tool_workspace_and_session(monkeypatch, caplog):

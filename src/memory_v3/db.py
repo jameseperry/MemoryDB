@@ -102,6 +102,43 @@ def resolve_effective_session_id(session_id: str | None = None) -> str:
         raise ValueError("Session ID is required") from exc
 
 
+def _parse_bool_header(value: str, *, header_name: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{header_name} header must be a boolean value like true/false"
+    )
+
+
+def resolve_effective_readonly(readonly: bool | None = None) -> bool:
+    """Resolve the effective readonly flag for the current request."""
+    header_key = settings.mcp_readonly_header.lower()
+    header_readonly = get_http_headers().get(header_key)
+    if header_readonly is not None:
+        parsed_header = _parse_bool_header(
+            header_readonly,
+            header_name=settings.mcp_readonly_header,
+        )
+        if readonly is not None and readonly != parsed_header:
+            raise ValueError(
+                "Readonly parameter does not match "
+                f"{settings.mcp_readonly_header} header"
+            )
+        return parsed_header
+    return bool(readonly)
+
+
+def ensure_request_writable(readonly: bool | None = None) -> None:
+    """Raise if the current request is marked readonly."""
+    if resolve_effective_readonly(readonly):
+        raise PermissionError(
+            f"{settings.mcp_readonly_header} forbids mutation for this request"
+        )
+
+
 def resolve_optional_session_id(session_id: str | None = None) -> str:
     """Resolve a session ID, falling back to a stable internal sentinel."""
     try:

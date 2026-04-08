@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     )
     mcp_workspace_header: str = "X-Memory-Workspace"
     mcp_session_header: str = "X-Memory-Session-Id"
+    mcp_readonly_header: str = "X-Memory-Readonly"
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 8765
     embed_model_name: str = "nomic-ai/nomic-embed-text-v1.5"

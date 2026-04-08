@@ -11,6 +11,7 @@ from memory_v3 import mcp_tools
 from memory_v3.config import settings
 from memory_v3.db import (
     record_event,
+    resolve_effective_readonly,
     resolve_effective_session_id,
     resolve_effective_workspace_name,
 )
@@ -52,6 +53,23 @@ def test_v3_resolve_effective_session_rejects_mismatch(monkeypatch):
     )
     with pytest.raises(ValueError, match="does not match"):
         resolve_effective_session_id("other-session")
+
+
+def test_v3_resolve_effective_readonly_uses_header(monkeypatch):
+    monkeypatch.setattr(
+        "memory_v3.db.get_http_headers",
+        lambda: {settings.mcp_readonly_header.lower(): "true"},
+    )
+    assert resolve_effective_readonly() is True
+
+
+def test_v3_resolve_effective_readonly_rejects_mismatch(monkeypatch):
+    monkeypatch.setattr(
+        "memory_v3.db.get_http_headers",
+        lambda: {settings.mcp_readonly_header.lower(): "true"},
+    )
+    with pytest.raises(ValueError, match="Readonly parameter does not match"):
+        resolve_effective_readonly(False)
 
 
 def test_v3_wrappers_do_not_expose_workspace_or_session():
@@ -96,6 +114,7 @@ def test_v3_wrappers_do_not_expose_workspace_or_session():
         parameters = inspect.signature(wrapper).parameters
         assert "workspace" not in parameters
         assert "session_id" not in parameters
+        assert "readonly" not in parameters
 
 
 def test_v3_wrapper_logs_workspace_and_sessions(monkeypatch, caplog):
@@ -1463,6 +1482,24 @@ async def test_v3_delete_observations_rejects_already_consolidated(monkeypatch):
         "deleted": [],
         "rejected": [{"id": 10, "reason": "already consolidated"}],
     }
+
+
+@pytest.mark.asyncio
+async def test_v3_remember_rejects_readonly_header(monkeypatch):
+    monkeypatch.setattr(
+        "memory_v3.db.get_http_headers",
+        lambda: {settings.mcp_readonly_header.lower(): "true"},
+    )
+
+    with pytest.raises(
+        PermissionError,
+        match=f"{settings.mcp_readonly_header} forbids mutation",
+    ):
+        await tools_module.remember(
+            ["memory_system_v3"],
+            "Readonly write should fail.",
+            workspace="james/gpt",
+        )
 
 
 @pytest.mark.asyncio

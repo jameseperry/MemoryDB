@@ -10,6 +10,7 @@ import asyncpg
 
 from memory_v3.config import settings
 from memory_v3.db import (
+    ensure_request_writable,
     get_pool,
     get_workspace_generation,
     hash_content,
@@ -632,8 +633,10 @@ async def _create_understanding_record(
 async def create_subjects(
     subjects: list[dict],
     workspace: str | None = None,
+    readonly: bool | None = None,
 ) -> list[dict]:
     """Create named semantic regions."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     session_id = resolve_optional_session_id()
 
@@ -779,8 +782,10 @@ async def set_subject_summary(
     name: str,
     summary: str,
     workspace: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Update a subject summary."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     session_id = resolve_optional_session_id()
 
@@ -816,8 +821,10 @@ async def set_subject_tags(
     name: str,
     tags: list[str],
     workspace: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Replace subject tags."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     session_id = resolve_optional_session_id()
 
@@ -853,8 +860,10 @@ async def set_structural_understanding(
     subject_name: str,
     content: str,
     workspace: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Write or replace a subject's structural understanding."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id()
 
@@ -929,8 +938,10 @@ async def add_observations(
     observations: list[dict],
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> list[dict]:
     """Append observations with provenance metadata."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
 
@@ -1083,8 +1094,10 @@ async def delete_observations(
     ids: list[int],
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Delete observations written in the current session and generation only."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
 
@@ -1233,8 +1246,10 @@ async def create_understanding(
     workspace: str | None = None,
     session_id: str | None = None,
     reason: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Write a consolidated understanding tagged with one or more subjects."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
 
@@ -1429,8 +1444,10 @@ async def update_understanding(
     reason: str | None = None,
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Revise a consolidated understanding by supersession."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
 
@@ -1553,8 +1570,10 @@ async def delete_understanding(
     understanding_id: int,
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Delete an active understanding written in the current session and generation."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
 
@@ -1618,8 +1637,10 @@ async def rewrite_understanding(
     new_summary: str,
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Rewrite an active understanding in place within the current session and generation."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
 
@@ -2231,8 +2252,10 @@ async def finalize_consolidation(
     created_understanding_ids: list[int] | None = None,
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Finalize a consolidation pass by advancing the workspace generation."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
     normalized_summary = summary.strip()
@@ -2297,8 +2320,10 @@ async def set_session_model_tier(
     model_tier: str | None = None,
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Set or clear the model tier associated with the active session."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
 
@@ -2362,8 +2387,10 @@ async def set_workspace_documents(
     consolidation_understanding_id: int | None = None,
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Set one or more workspace special-document pointers."""
+    ensure_request_writable(readonly)
     updates = {
         "soul_understanding_id": soul_understanding_id,
         "protocol_understanding_id": protocol_understanding_id,
@@ -2419,8 +2446,10 @@ async def set_workspace_documents(
 async def reset_seen(
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Clear the surfaced-item log for the active session."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
 
@@ -2592,6 +2621,7 @@ async def remember(
     points_to: list[int] | None = None,
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Append an observation tagged with one or more subjects."""
     results = await add_observations(
@@ -2607,6 +2637,7 @@ async def remember(
         ],
         workspace=workspace,
         session_id=session_id,
+        readonly=readonly,
     )
     return results[0]
 
@@ -2615,6 +2646,7 @@ async def mark_useful(
     id: int,
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Record a useful signal against an observation or understanding."""
     return await _mark_signal(
@@ -2623,6 +2655,7 @@ async def mark_useful(
         reason=None,
         workspace=workspace,
         session_id=session_id,
+        readonly=readonly,
     )
 
 
@@ -2631,6 +2664,7 @@ async def mark_questionable(
     reason: str | None = None,
     workspace: str | None = None,
     session_id: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Record a questionable signal against an observation or understanding."""
     return await _mark_signal(
@@ -2639,6 +2673,7 @@ async def mark_questionable(
         reason=reason,
         workspace=workspace,
         session_id=session_id,
+        readonly=readonly,
     )
 
 
@@ -2649,7 +2684,9 @@ async def _mark_signal(
     reason: str | None,
     workspace: str | None,
     session_id: str | None,
+    readonly: bool | None = None,
 ) -> dict:
+    ensure_request_writable(readonly)
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
 
@@ -3312,8 +3349,10 @@ async def merge_subjects(
     primary: str,
     duplicate: str,
     workspace: str | None = None,
+    readonly: bool | None = None,
 ) -> dict:
     """Merge duplicate subject tags into a primary subject."""
+    ensure_request_writable(readonly)
     pool = await get_pool()
     session_id = resolve_optional_session_id()
 
