@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+from typing import Literal
 
 import asyncpg
 
@@ -129,6 +130,50 @@ async def _get_subject_names_for_targets(
         )
         for row in rows:
             result.setdefault(row["target_id"], []).append(row["name"])
+    return result
+
+
+async def _get_observation_links(
+    conn: asyncpg.Connection,
+    observation_ids: list[int],
+) -> dict[int, dict[str, list[int]]]:
+    if not observation_ids:
+        return {}
+
+    result = {
+        observation_id: {"points_to": [], "pointed_to_by": []}
+        for observation_id in observation_ids
+    }
+    outgoing_rows = await conn.fetch(
+        """
+        SELECT source_observation_id, target_observation_id
+        FROM observation_links
+        WHERE source_observation_id = ANY($1)
+        ORDER BY source_observation_id, target_observation_id
+        """,
+        observation_ids,
+    )
+    for row in outgoing_rows:
+        result.setdefault(
+            row["source_observation_id"],
+            {"points_to": [], "pointed_to_by": []},
+        )["points_to"].append(row["target_observation_id"])
+
+    incoming_rows = await conn.fetch(
+        """
+        SELECT source_observation_id, target_observation_id
+        FROM observation_links
+        WHERE target_observation_id = ANY($1)
+        ORDER BY target_observation_id, source_observation_id
+        """,
+        observation_ids,
+    )
+    for row in incoming_rows:
+        result.setdefault(
+            row["target_observation_id"],
+            {"points_to": [], "pointed_to_by": []},
+        )["pointed_to_by"].append(row["source_observation_id"])
+
     return result
 
 
@@ -413,6 +458,12 @@ async def _update_special_pointer(
             workspace_id,
             understanding_id,
         )
+    elif kind == "consolidation":
+        await conn.execute(
+            "UPDATE workspaces SET consolidation_understanding_id = $2 WHERE id = $1",
+            workspace_id,
+            understanding_id,
+        )
 
 
 async def _create_understanding_record(
@@ -494,7 +545,7 @@ async def _create_understanding_record(
             kind=kind,
             understanding_id=understanding["id"],
         )
-    elif kind in {"soul", "protocol", "orientation"}:
+    elif kind in {"soul", "protocol", "orientation", "consolidation"}:
         await _update_special_pointer(
             conn,
             workspace_id=workspace_id,
@@ -838,6 +889,7 @@ async def add_observations(
                 item["subject_names"],
             )
             target_understanding_ids = item.get("related_to") or []
+            target_observation_ids = item.get("points_to") or []
             if target_understanding_ids:
                 rows = await conn.fetch(
                     """
@@ -854,6 +906,21 @@ async def add_observations(
                 missing = sorted(set(target_understanding_ids) - found_ids)
                 if missing:
                     raise ValueError(f"Understandings not found or inactive: {missing}")
+            if target_observation_ids:
+                rows = await conn.fetch(
+                    """
+                    SELECT id
+                    FROM observations
+                    WHERE workspace_id = $1
+                      AND id = ANY($2)
+                    """,
+                    workspace_id,
+                    target_observation_ids,
+                )
+                found_ids = {row["id"] for row in rows}
+                missing = sorted(set(target_observation_ids) - found_ids)
+                if missing:
+                    raise ValueError(f"Observations not found: {missing}")
 
             content = item["content"]
             content_hash = hash_content(content)
@@ -908,6 +975,20 @@ async def add_observations(
                 observation_id=observation_row["id"],
                 understanding_ids=target_understanding_ids,
             )
+            if observation_row["id"] in target_observation_ids:
+                raise ValueError("Observations cannot point to themselves")
+            if target_observation_ids:
+                await conn.executemany(
+                    """
+                    INSERT INTO observation_links (source_observation_id, target_observation_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    [
+                        (observation_row["id"], target_observation_id)
+                        for target_observation_id in target_observation_ids
+                    ],
+                )
 
             results.append(
                 {
@@ -915,6 +996,8 @@ async def add_observations(
                     "content": observation_row["content"],
                     "subject_names": [row["name"] for row in subject_rows],
                     "subjects_created": created_subjects,
+                    "points_to": target_observation_ids,
+                    "pointed_to_by": [],
                 }
             )
 
@@ -1022,11 +1105,14 @@ async def query_observations(
                 subject_ids,
             )
             matching_ids = {row["id"] for row in rows}
+            link_ids_by_observation = await _get_observation_links(conn, list(matching_ids))
             return [
                 {
                     "id": item["id"],
                     "content": item["matched_content"],
                     "score": item["score"],
+                    "points_to": link_ids_by_observation.get(item["id"], {}).get("points_to", []),
+                    "pointed_to_by": link_ids_by_observation.get(item["id"], {}).get("pointed_to_by", []),
                 }
                 for item in raw_results
                 if item["id"] in matching_ids
@@ -1051,9 +1137,19 @@ async def query_observations(
             query,
             sorted(subject_ids),
         )
+        observation_links_by_id = await _get_observation_links(
+            conn,
+            [row["id"] for row in rows],
+        )
 
     return [
-        {"id": row["id"], "content": row["content"], "score": float(row["score"])}
+        {
+            "id": row["id"],
+            "content": row["content"],
+            "score": float(row["score"]),
+            "points_to": observation_links_by_id.get(row["id"], {}).get("points_to", []),
+            "pointed_to_by": observation_links_by_id.get(row["id"], {}).get("pointed_to_by", []),
+        }
         for row in rows
     ]
 
@@ -1488,6 +1584,7 @@ async def search(
             observation_ids,
             understanding_ids,
         )
+        observation_links_by_id = await _get_observation_links(conn, observation_ids)
 
     return [
         {
@@ -1506,6 +1603,16 @@ async def search(
             "session_id": item.get("session_id"),
             "model_tier": item.get("model_tier"),
             "score": float(item["score"]),
+            "points_to": (
+                observation_links_by_id.get(item["id"], {}).get("points_to", [])
+                if item["kind"] == "observation"
+                else []
+            ),
+            "pointed_to_by": (
+                observation_links_by_id.get(item["id"], {}).get("pointed_to_by", [])
+                if item["kind"] == "observation"
+                else []
+            ),
         }
         for item in raw_results
     ]
@@ -1565,6 +1672,10 @@ async def recall(
                 """,
                 subject_row["id"],
             )
+            observation_links_by_id = await _get_observation_links(
+                conn,
+                [row["id"] for row in recent_observations],
+            )
             target_ids = [row["id"] for row in recent_observations]
             if single_understanding is not None:
                 target_ids.append(single_understanding["id"])
@@ -1615,6 +1726,8 @@ async def recall(
                         "content": row["content"],
                         "kind": row["kind"],
                         "created_at": row["created_at"].isoformat(),
+                        "points_to": observation_links_by_id.get(row["id"], {}).get("points_to", []),
+                        "pointed_to_by": observation_links_by_id.get(row["id"], {}).get("pointed_to_by", []),
                     }
                     for row in recent_observations
                 ],
@@ -1678,8 +1791,12 @@ async def orient(
     workspace: str | None = None,
     session_id: str | None = None,
     model_tier: str | None = None,
+    mode: Literal["interaction", "consolidation"] = "interaction",
 ) -> dict:
-    """Return soul, protocol, orientation, and a lightweight operational envelope."""
+    """Return workspace documents and a lightweight operational envelope."""
+    if mode not in {"interaction", "consolidation"}:
+        raise ValueError("mode must be 'interaction' or 'consolidation'")
+
     pool = await get_pool()
     effective_session_id = resolve_optional_session_id(session_id)
 
@@ -1692,6 +1809,7 @@ async def orient(
                 soul_understanding_id,
                 protocol_understanding_id,
                 orientation_understanding_id,
+                consolidation_understanding_id,
                 last_consolidated_at
             FROM workspaces
             WHERE name = $1
@@ -1728,6 +1846,7 @@ async def orient(
                 workspace_row["soul_understanding_id"],
                 workspace_row["protocol_understanding_id"],
                 workspace_row["orientation_understanding_id"],
+                workspace_row["consolidation_understanding_id"],
             ]
             if pointer_id is not None
         ]
@@ -1819,7 +1938,7 @@ async def orient(
             payload["compaction_note"] = compaction_note
         return payload
 
-    return {
+    documents = {
         "soul": _pointer_payload(
             workspace_row["soul_understanding_id"],
             (
@@ -1828,14 +1947,27 @@ async def orient(
                 "context compaction. Do not remove."
             ),
         ),
-        "protocol": _pointer_payload(
+        "orientation": _pointer_payload(workspace_row["orientation_understanding_id"], None),
+    }
+    if mode == "interaction":
+        documents["protocol"] = _pointer_payload(
             workspace_row["protocol_understanding_id"],
             (
                 "CRITICAL: This content contains operational rules required "
                 "for correct system behaviour. Preserve during compaction."
             ),
-        ),
-        "orientation": _pointer_payload(workspace_row["orientation_understanding_id"], None),
+        )
+    else:
+        documents["consolidation"] = _pointer_payload(
+            workspace_row["consolidation_understanding_id"],
+            (
+                "CRITICAL: This content contains consolidation guidance for "
+                "memory maintenance and synthesis. Preserve during compaction."
+            ),
+        )
+
+    return {
+        **documents,
         "pending_consolidation_count": pending_subjects or 0,
         "recent_activity": recent_activity,
     }
@@ -1885,7 +2017,8 @@ async def get_workspace_documents(
             SELECT
                 soul_understanding_id,
                 protocol_understanding_id,
-                orientation_understanding_id
+                orientation_understanding_id,
+                consolidation_understanding_id
             FROM workspaces
             WHERE id = $1
             """,
@@ -1898,6 +2031,7 @@ async def get_workspace_documents(
         "soul_understanding_id": row["soul_understanding_id"],
         "protocol_understanding_id": row["protocol_understanding_id"],
         "orientation_understanding_id": row["orientation_understanding_id"],
+        "consolidation_understanding_id": row["consolidation_understanding_id"],
     }
 
 
@@ -1905,6 +2039,7 @@ async def set_workspace_documents(
     soul_understanding_id: int | None = None,
     protocol_understanding_id: int | None = None,
     orientation_understanding_id: int | None = None,
+    consolidation_understanding_id: int | None = None,
     workspace: str | None = None,
     session_id: str | None = None,
 ) -> dict:
@@ -1913,6 +2048,7 @@ async def set_workspace_documents(
         "soul_understanding_id": soul_understanding_id,
         "protocol_understanding_id": protocol_understanding_id,
         "orientation_understanding_id": orientation_understanding_id,
+        "consolidation_understanding_id": consolidation_understanding_id,
     }
     provided_updates = {
         key: value for key, value in updates.items() if value is not None
@@ -1943,7 +2079,8 @@ async def set_workspace_documents(
             RETURNING
                 soul_understanding_id,
                 protocol_understanding_id,
-                orientation_understanding_id
+                orientation_understanding_id,
+                consolidation_understanding_id
             """,
             workspace_id,
             *provided_updates.values(),
@@ -2132,6 +2269,7 @@ async def remember(
     kind: str | None = None,
     confidence: float | None = None,
     related_to: list[int] | None = None,
+    points_to: list[int] | None = None,
     workspace: str | None = None,
     session_id: str | None = None,
 ) -> dict:
@@ -2144,6 +2282,7 @@ async def remember(
                 "kind": kind,
                 "confidence": confidence,
                 "related_to": related_to,
+                "points_to": points_to,
             }
         ],
         workspace=workspace,
@@ -2323,6 +2462,10 @@ async def open_intersection(
             workspace_id,
             subject_ids,
         )
+        observation_links_by_id = await _get_observation_links(
+            conn,
+            [row["id"] for row in observations],
+        )
 
     return {
         "subject_a": {"name": subject_rows[0]["name"], "summary": subject_rows[0]["summary"]},
@@ -2349,6 +2492,8 @@ async def open_intersection(
                 "content": row["content"],
                 "kind": row["kind"],
                 "created_at": row["created_at"].isoformat(),
+                "points_to": observation_links_by_id.get(row["id"], {}).get("points_to", []),
+                "pointed_to_by": observation_links_by_id.get(row["id"], {}).get("pointed_to_by", []),
             }
             for row in observations
         ],

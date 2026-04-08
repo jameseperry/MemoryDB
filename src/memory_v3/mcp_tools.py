@@ -8,6 +8,7 @@ parameters from the exposed schema.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from fastmcp.server.dependencies import get_context
 
@@ -64,9 +65,12 @@ async def get_status() -> dict:
     }
 
 
-async def orient(model_tier: str | None = None) -> dict:
+async def orient(
+    model_tier: str | None = None,
+    mode: Literal["interaction", "consolidation"] = "interaction",
+) -> dict:
     _log_tool_call("orient")
-    return await tools.orient(model_tier=model_tier)
+    return await tools.orient(model_tier=model_tier, mode=mode)
 
 
 async def bring_to_mind(
@@ -106,12 +110,14 @@ async def set_workspace_documents(
     soul_understanding_id: int | None = None,
     protocol_understanding_id: int | None = None,
     orientation_understanding_id: int | None = None,
+    consolidation_understanding_id: int | None = None,
 ) -> dict:
     _log_tool_call("set_workspace_documents")
     return await tools.set_workspace_documents(
         soul_understanding_id=soul_understanding_id,
         protocol_understanding_id=protocol_understanding_id,
         orientation_understanding_id=orientation_understanding_id,
+        consolidation_understanding_id=consolidation_understanding_id,
     )
 
 
@@ -121,6 +127,7 @@ async def remember(
     kind: str | None = None,
     confidence: float | None = None,
     related_to: list[int] | None = None,
+    points_to: list[int] | None = None,
 ) -> dict:
     _log_tool_call("remember")
     return await tools.remember(
@@ -129,6 +136,7 @@ async def remember(
         kind=kind,
         confidence=confidence,
         related_to=related_to,
+        points_to=points_to,
     )
 
 

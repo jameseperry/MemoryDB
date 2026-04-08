@@ -282,16 +282,16 @@ async def test_v3_set_session_model_tier_wrapper_forwards_argument(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v3_orient_wrapper_forwards_model_tier(monkeypatch):
-    async def fake_orient(model_tier=None):
-        return {"model_tier": model_tier}
+async def test_v3_orient_wrapper_forwards_model_tier_and_mode(monkeypatch):
+    async def fake_orient(model_tier=None, mode="interaction"):
+        return {"model_tier": model_tier, "mode": mode}
 
     monkeypatch.setattr("memory_v3.mcp_tools.tools.orient", fake_orient)
     monkeypatch.setattr("memory_v3.mcp_tools._log_tool_call", lambda name: None)
 
-    result = await mcp_tools.orient("gpt-5.4")
+    result = await mcp_tools.orient("gpt-5.4", "consolidation")
 
-    assert result == {"model_tier": "gpt-5.4"}
+    assert result == {"model_tier": "gpt-5.4", "mode": "consolidation"}
 
 
 @pytest.mark.asyncio
@@ -367,6 +367,12 @@ async def test_v3_add_observations_uses_session_model_tier(monkeypatch):
     captured = {}
 
     class FakeConn:
+        async def fetch(self, query, *args):
+            if "SELECT id" in query and "FROM observations" in query:
+                assert args == (7, [88])
+                return [{"id": 88}]
+            raise AssertionError(query)
+
         async def fetchrow(self, query, *args):
             if "INSERT INTO sessions" in query:
                 assert args == (7, "conversation-42")
@@ -385,6 +391,9 @@ async def test_v3_add_observations_uses_session_model_tier(monkeypatch):
         async def executemany(self, query, args):
             if "INSERT INTO observation_subjects" in query:
                 captured["subject_links"] = args
+                return None
+            if "INSERT INTO observation_links" in query:
+                captured["observation_links"] = args
                 return None
             raise AssertionError(query)
 
@@ -453,6 +462,7 @@ async def test_v3_add_observations_uses_session_model_tier(monkeypatch):
             {
                 "subject_names": ["memory_system_v3"],
                 "content": "memory3 keeps session provenance",
+                "points_to": [88],
             }
         ],
         workspace="james/gpt",
@@ -464,10 +474,76 @@ async def test_v3_add_observations_uses_session_model_tier(monkeypatch):
             "content": "memory3 keeps session provenance",
             "subject_names": ["memory_system_v3"],
             "subjects_created": [],
+            "points_to": [88],
+            "pointed_to_by": [],
         }
     ]
     assert captured["insert_args"][-2:] == (99, "gpt-5.4")
     assert captured["subject_links"] == [(77, 101)]
+    assert captured["observation_links"] == [(77, 88)]
+
+
+@pytest.mark.asyncio
+async def test_v3_add_observations_validates_points_to_ids(monkeypatch):
+    class FakeConn:
+        async def fetch(self, query, *args):
+            if "SELECT id" in query and "FROM observations" in query:
+                assert args == (7, [88, 99])
+                return [{"id": 88}]
+            raise AssertionError(query)
+
+        async def fetchrow(self, query, *args):
+            if "INSERT INTO sessions" in query:
+                return {"session_id": 99}
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_resolve_workspace_id(_conn, workspace):
+        return 7
+
+    async def fake_get_workspace_generation(_conn, workspace_id):
+        return 3
+
+    async def fake_get_session_model_tier(_conn, workspace_id, session_id):
+        return "gpt-5.4"
+
+    async def fake_ensure_subjects(_conn, workspace_id, subject_names):
+        return ([{"id": 101, "name": "memory_system_v3"}], [])
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr("memory_v3.tools.resolve_workspace_id", fake_resolve_workspace_id)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+    monkeypatch.setattr("memory_v3.tools.get_workspace_generation", fake_get_workspace_generation)
+    monkeypatch.setattr("memory_v3.tools._get_session_model_tier", fake_get_session_model_tier)
+    monkeypatch.setattr("memory_v3.tools._ensure_subjects", fake_ensure_subjects)
+
+    with pytest.raises(ValueError, match=r"Observations not found: \[99\]"):
+        await tools_module.add_observations(
+            [
+                {
+                    "subject_names": ["memory_system_v3"],
+                    "content": "memory3 keeps session provenance",
+                    "points_to": [88, 99],
+                }
+            ],
+            workspace="james/gpt",
+        )
 
 
 @pytest.mark.asyncio
@@ -776,6 +852,9 @@ async def test_v3_query_observations_embedding_mode_filters_semantic_hits_by_sub
             if "o.id = ANY($2::bigint[])" in query:
                 assert args == (7, [8, 9], [101])
                 return [{"id": 8}]
+            if "FROM observation_links" in query:
+                assert args == ([8],)
+                return []
             raise AssertionError(query)
 
     class FakeAcquire:
@@ -835,6 +914,8 @@ async def test_v3_query_observations_embedding_mode_filters_semantic_hits_by_sub
             "id": 8,
             "content": "memory3 uses intersection content",
             "score": 0.765,
+            "points_to": [],
+            "pointed_to_by": [],
         }
     ]
 
@@ -1020,6 +1101,7 @@ async def test_v3_get_workspace_documents_wrapper(monkeypatch):
             "soul_understanding_id": 11,
             "protocol_understanding_id": 12,
             "orientation_understanding_id": None,
+            "consolidation_understanding_id": 13,
         }
 
     monkeypatch.setattr(
@@ -1034,6 +1116,7 @@ async def test_v3_get_workspace_documents_wrapper(monkeypatch):
         "soul_understanding_id": 11,
         "protocol_understanding_id": 12,
         "orientation_understanding_id": None,
+        "consolidation_understanding_id": 13,
     }
 
 
@@ -1043,11 +1126,13 @@ async def test_v3_set_workspace_documents_wrapper_forwards_ids(monkeypatch):
         soul_understanding_id=None,
         protocol_understanding_id=None,
         orientation_understanding_id=None,
+        consolidation_understanding_id=None,
     ):
         return {
             "soul_understanding_id": soul_understanding_id,
             "protocol_understanding_id": protocol_understanding_id,
             "orientation_understanding_id": orientation_understanding_id,
+            "consolidation_understanding_id": consolidation_understanding_id,
         }
 
     monkeypatch.setattr(
@@ -1059,12 +1144,14 @@ async def test_v3_set_workspace_documents_wrapper_forwards_ids(monkeypatch):
     result = await mcp_tools.set_workspace_documents(
         soul_understanding_id=11,
         protocol_understanding_id=12,
+        consolidation_understanding_id=13,
     )
 
     assert result == {
         "soul_understanding_id": 11,
         "protocol_understanding_id": 12,
         "orientation_understanding_id": None,
+        "consolidation_understanding_id": 13,
     }
 
 
@@ -1249,6 +1336,7 @@ async def test_v3_orient_rejects_superseded_special_pointer(monkeypatch):
                     "soul_understanding_id": 11,
                     "protocol_understanding_id": None,
                     "orientation_understanding_id": None,
+                    "consolidation_understanding_id": 13,
                     "last_consolidated_at": None,
                 }
             if "INSERT INTO sessions" in query:
@@ -1262,7 +1350,7 @@ async def test_v3_orient_rejects_superseded_special_pointer(monkeypatch):
 
         async def fetch(self, query, *args):
             if "SELECT id, content, summary, kind, generation, created_at, superseded_by" in query:
-                assert args == ([11],)
+                assert args == ([11, 13],)
                 return [
                     {
                         "id": 11,
@@ -1272,6 +1360,15 @@ async def test_v3_orient_rejects_superseded_special_pointer(monkeypatch):
                         "generation": 0,
                         "created_at": datetime(2026, 4, 2, tzinfo=timezone.utc),
                         "superseded_by": 12,
+                    },
+                    {
+                        "id": 13,
+                        "content": "consolidation",
+                        "summary": "consolidation",
+                        "kind": "consolidation",
+                        "generation": 0,
+                        "created_at": datetime(2026, 4, 2, tzinfo=timezone.utc),
+                        "superseded_by": None,
                     }
                 ]
             raise AssertionError(query)
@@ -1320,6 +1417,7 @@ async def test_v3_orient_uses_strict_generation_for_pending_subjects(monkeypatch
                     "soul_understanding_id": None,
                     "protocol_understanding_id": None,
                     "orientation_understanding_id": None,
+                    "consolidation_understanding_id": None,
                     "last_consolidated_at": None,
                 }
             if "INSERT INTO sessions" in query and "RETURNING model_tier" in query:
@@ -1398,6 +1496,7 @@ async def test_v3_get_workspace_documents_reads_pointer_ids(monkeypatch):
                     "soul_understanding_id": 11,
                     "protocol_understanding_id": 12,
                     "orientation_understanding_id": None,
+                    "consolidation_understanding_id": 13,
                 }
             raise AssertionError(query)
 
@@ -1423,6 +1522,7 @@ async def test_v3_get_workspace_documents_reads_pointer_ids(monkeypatch):
         "soul_understanding_id": 11,
         "protocol_understanding_id": 12,
         "orientation_understanding_id": None,
+        "consolidation_understanding_id": 13,
     }
 
 
@@ -1439,7 +1539,7 @@ async def test_v3_set_workspace_documents_validates_active_understandings(monkey
 
         async def fetch(self, query, *args):
             if "SELECT id, content, summary, kind, generation, created_at, superseded_by" in query:
-                assert args == ([11, 12],)
+                assert args == ([11, 12, 13],)
                 return [
                     {
                         "id": 11,
@@ -1459,6 +1559,15 @@ async def test_v3_set_workspace_documents_validates_active_understandings(monkey
                         "created_at": datetime(2026, 4, 2, tzinfo=timezone.utc),
                         "superseded_by": None,
                     },
+                    {
+                        "id": 13,
+                        "content": "consolidation",
+                        "summary": "consolidation",
+                        "kind": "consolidation",
+                        "generation": 0,
+                        "created_at": datetime(2026, 4, 2, tzinfo=timezone.utc),
+                        "superseded_by": None,
+                    },
                 ]
             raise AssertionError(query)
 
@@ -1470,6 +1579,7 @@ async def test_v3_set_workspace_documents_validates_active_understandings(monkey
                     "soul_understanding_id": 11,
                     "protocol_understanding_id": 12,
                     "orientation_understanding_id": None,
+                    "consolidation_understanding_id": 13,
                 }
             if "INSERT INTO sessions" in query:
                 assert args == (7, "conversation-42")
@@ -1505,6 +1615,7 @@ async def test_v3_set_workspace_documents_validates_active_understandings(monkey
     result = await tools_module.set_workspace_documents(
         soul_understanding_id=11,
         protocol_understanding_id=12,
+        consolidation_understanding_id=13,
         workspace="james/gpt",
     )
 
@@ -1512,10 +1623,12 @@ async def test_v3_set_workspace_documents_validates_active_understandings(monkey
         "soul_understanding_id": 11,
         "protocol_understanding_id": 12,
         "orientation_understanding_id": None,
+        "consolidation_understanding_id": 13,
     }
     assert "soul_understanding_id = $2" in captured["update_query"]
     assert "protocol_understanding_id = $3" in captured["update_query"]
-    assert captured["update_args"] == (7, 11, 12)
+    assert "consolidation_understanding_id = $4" in captured["update_query"]
+    assert captured["update_args"] == (7, 11, 12, 13)
     assert captured["event_args"] == (
         7,
         99,
@@ -1524,6 +1637,116 @@ async def test_v3_set_workspace_documents_validates_active_understandings(monkey
             {
                 "soul_understanding_id": 11,
                 "protocol_understanding_id": 12,
+                "consolidation_understanding_id": 13,
             }
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_v3_orient_consolidation_mode_returns_consolidation_document(monkeypatch):
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "FROM workspaces" in query:
+                return {
+                    "id": 7,
+                    "soul_understanding_id": 11,
+                    "protocol_understanding_id": 12,
+                    "orientation_understanding_id": 14,
+                    "consolidation_understanding_id": 13,
+                    "last_consolidated_at": None,
+                }
+            if "INSERT INTO sessions" in query and "RETURNING model_tier" in query:
+                return {"model_tier": "gpt-5.4"}
+            if "INSERT INTO sessions" in query and "RETURNING session_id" in query:
+                return {"session_id": 99}
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            if "DELETE FROM surfaced_in_session" in query:
+                return None
+            if "INSERT INTO events" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "SELECT id, content, summary, kind, generation, created_at, superseded_by" in query:
+                assert args == ([11, 12, 14, 13],)
+                return [
+                    {
+                        "id": 11,
+                        "content": "soul content",
+                        "summary": "soul summary",
+                        "kind": "soul",
+                        "generation": 0,
+                        "created_at": datetime(2026, 4, 2, tzinfo=timezone.utc),
+                        "superseded_by": None,
+                    },
+                    {
+                        "id": 12,
+                        "content": "protocol content",
+                        "summary": "protocol summary",
+                        "kind": "protocol",
+                        "generation": 0,
+                        "created_at": datetime(2026, 4, 2, tzinfo=timezone.utc),
+                        "superseded_by": None,
+                    },
+                    {
+                        "id": 13,
+                        "content": "consolidation content",
+                        "summary": "consolidation summary",
+                        "kind": "consolidation",
+                        "generation": 0,
+                        "created_at": datetime(2026, 4, 2, tzinfo=timezone.utc),
+                        "superseded_by": None,
+                    },
+                    {
+                        "id": 14,
+                        "content": "orientation content",
+                        "summary": "orientation summary",
+                        "kind": "orientation",
+                        "generation": 0,
+                        "created_at": datetime(2026, 4, 2, tzinfo=timezone.utc),
+                        "superseded_by": None,
+                    },
+                ]
+            raise AssertionError(query)
+
+        async def fetchval(self, query, *args):
+            if "SELECT COUNT(*)" in query and "FROM subjects s" in query:
+                return 0
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_effective_workspace_name",
+        lambda workspace=None: "james/gpt",
+    )
+
+    result = await tools_module.orient(
+        workspace="james/gpt",
+        mode="consolidation",
+    )
+
+    assert result["soul"]["content"] == "soul content"
+    assert result["consolidation"]["content"] == "consolidation content"
+    assert result["orientation"]["content"] == "orientation content"
+    assert "protocol" not in result

@@ -168,16 +168,19 @@ async def test_v3_workspace_set_document_ids(monkeypatch):
             "soul_understanding_id": None,
             "protocol_understanding_id": None,
             "orientation_understanding_id": None,
+            "consolidation_understanding_id": None,
         },
         understanding_rows={
             11: {"id": 11},
             12: {"id": 12},
+            13: {"id": 13},
         },
         updated_workspace_row={
             "name": "alpha",
             "soul_understanding_id": 11,
             "protocol_understanding_id": None,
             "orientation_understanding_id": 12,
+            "consolidation_understanding_id": 13,
         },
     )
 
@@ -190,6 +193,7 @@ async def test_v3_workspace_set_document_ids(monkeypatch):
         "alpha",
         soul_id=11,
         orientation_id=12,
+        consolidation_id=13,
     )
 
     assert result == {
@@ -197,6 +201,7 @@ async def test_v3_workspace_set_document_ids(monkeypatch):
         "soul_understanding_id": 11,
         "protocol_understanding_id": None,
         "orientation_understanding_id": 12,
+        "consolidation_understanding_id": 13,
     }
 
 
@@ -215,6 +220,7 @@ async def test_v3_workspace_set_document_ids_rejects_missing_understanding(monke
             "soul_understanding_id": None,
             "protocol_understanding_id": None,
             "orientation_understanding_id": None,
+            "consolidation_understanding_id": None,
         },
         understanding_rows={},
     )
@@ -287,12 +293,14 @@ def test_v3_cli_set_documents_json(monkeypatch, capsys):
         soul_id: int | None = None,
         protocol_id: int | None = None,
         orientation_id: int | None = None,
+        consolidation_id: int | None = None,
     ):
         return {
             "name": name,
             "soul_understanding_id": soul_id,
             "protocol_understanding_id": protocol_id,
             "orientation_understanding_id": orientation_id,
+            "consolidation_understanding_id": consolidation_id,
         }
 
     monkeypatch.setattr("memory_v3.admin_cli.init_pool", fake_init_pool)
@@ -312,13 +320,16 @@ def test_v3_cli_set_documents_json(monkeypatch, capsys):
             "11",
             "--orientation",
             "12",
+            "--consolidation",
+            "13",
         ]
     )
 
     assert exit_code == 0
     assert capsys.readouterr().out.strip() == (
         '{"name": "alpha", "soul_understanding_id": 11, '
-        '"protocol_understanding_id": null, "orientation_understanding_id": 12}'
+        '"protocol_understanding_id": null, "orientation_understanding_id": 12, '
+        '"consolidation_understanding_id": 13}'
     )
 
 
@@ -369,6 +380,7 @@ def test_v3_cli_observation_create_json(monkeypatch, capsys):
         kind: str | None = None,
         confidence: float | None = None,
         related_to: list[int] | None = None,
+        points_to: list[int] | None = None,
         session_id: str = "admin-cli",
     ):
         assert workspace == "alpha"
@@ -377,12 +389,14 @@ def test_v3_cli_observation_create_json(monkeypatch, capsys):
         assert kind == "episodic"
         assert confidence == 0.9
         assert related_to == [42]
+        assert points_to == [88]
         assert session_id == "manual-check"
         return {
             "id": 77,
             "content": content,
             "kind": kind,
             "subject_names": subject_names,
+            "points_to": points_to,
         }
 
     monkeypatch.setattr("memory_v3.admin_cli.init_pool", fake_init_pool)
@@ -410,6 +424,8 @@ def test_v3_cli_observation_create_json(monkeypatch, capsys):
             "0.9",
             "--related-to",
             "42",
+            "--points-to",
+            "88",
             "--session-id",
             "manual-check",
         ]
@@ -418,7 +434,7 @@ def test_v3_cli_observation_create_json(monkeypatch, capsys):
     assert exit_code == 0
     assert capsys.readouterr().out.strip() == (
         '{"id": 77, "content": "James is validating v3", '
-        '"kind": "episodic", "subject_names": ["James", "MemoryDB"]}'
+        '"kind": "episodic", "subject_names": ["James", "MemoryDB"], "points_to": [88]}'
     )
 
 

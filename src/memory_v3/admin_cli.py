@@ -291,6 +291,12 @@ def workspace_remove(ctx: click.Context, name: str) -> None:
     type=int,
     help="Active understanding ID for the orientation document.",
 )
+@click.option(
+    "--consolidation",
+    "consolidation_id",
+    type=int,
+    help="Active understanding ID for the consolidation document.",
+)
 @click.pass_context
 def workspace_set_documents(
     ctx: click.Context,
@@ -298,6 +304,7 @@ def workspace_set_documents(
     soul_id: int | None,
     protocol_id: int | None,
     orientation_id: int | None,
+    consolidation_id: int | None,
 ) -> None:
     wrap = ctx.find_root().obj["wrap"]
     result = _run_admin_call(
@@ -306,6 +313,7 @@ def workspace_set_documents(
             soul_id=soul_id,
             protocol_id=protocol_id,
             orientation_id=orientation_id,
+            consolidation_id=consolidation_id,
         )
     )
     _emit_result(result, ctx.find_root().obj["as_json"], wrap=wrap)
@@ -467,6 +475,7 @@ def observation_list(
 @click.option("--kind", default=None)
 @click.option("--confidence", type=float, default=None)
 @click.option("--related-to", "related_to", multiple=True, type=int)
+@click.option("--points-to", "points_to", multiple=True, type=int)
 @click.option("--session-id", default="admin-cli", show_default=True)
 @click.pass_context
 def observation_create(
@@ -477,6 +486,7 @@ def observation_create(
     kind: str | None,
     confidence: float | None,
     related_to: tuple[int, ...],
+    points_to: tuple[int, ...],
     session_id: str,
 ) -> None:
     result = _run_admin_call(
@@ -487,6 +497,7 @@ def observation_create(
             kind=kind,
             confidence=confidence,
             related_to=list(related_to) or None,
+            points_to=list(points_to) or None,
             session_id=session_id,
         )
     )

@@ -229,6 +229,31 @@ async def _subject_names_for_understandings(conn, understanding_ids: list[int]) 
     return names_by_id
 
 
+async def _observation_link_ids(conn, observation_ids: list[int]) -> dict[int, dict[str, list[int]]]:
+    if not observation_ids:
+        return {}
+    result = {
+        observation_id: {"points_to": [], "pointed_to_by": []}
+        for observation_id in observation_ids
+    }
+    rows = await conn.fetch(
+        """
+        SELECT source_observation_id, target_observation_id
+        FROM observation_links
+        WHERE source_observation_id = ANY($1)
+           OR target_observation_id = ANY($1)
+        ORDER BY source_observation_id, target_observation_id
+        """,
+        observation_ids,
+    )
+    for row in rows:
+        if row["source_observation_id"] in result:
+            result[row["source_observation_id"]]["points_to"].append(row["target_observation_id"])
+        if row["target_observation_id"] in result:
+            result[row["target_observation_id"]]["pointed_to_by"].append(row["source_observation_id"])
+    return result
+
+
 def backup_database(path: str | Path, method: str = "auto") -> dict:
     """Back up the v3 database to a plain SQL file."""
     backup_path = _normalize_file_path(path)
@@ -395,6 +420,7 @@ async def set_workspace_document_ids(
     soul_id: int | None = None,
     protocol_id: int | None = None,
     orientation_id: int | None = None,
+    consolidation_id: int | None = None,
 ) -> dict:
     """Set workspace special-understanding pointers."""
     name = _normalize_workspace_name(name)
@@ -402,6 +428,7 @@ async def set_workspace_document_ids(
         "soul_understanding_id": soul_id,
         "protocol_understanding_id": protocol_id,
         "orientation_understanding_id": orientation_id,
+        "consolidation_understanding_id": consolidation_id,
     }
     provided = {column: value for column, value in updates.items() if value is not None}
     if not provided:
@@ -411,7 +438,13 @@ async def set_workspace_document_ids(
     async with pool.acquire() as conn:
         workspace_row = await conn.fetchrow(
             """
-            SELECT id, name, soul_understanding_id, protocol_understanding_id, orientation_understanding_id
+            SELECT
+                id,
+                name,
+                soul_understanding_id,
+                protocol_understanding_id,
+                orientation_understanding_id,
+                consolidation_understanding_id
             FROM workspaces
             WHERE name = $1
             """,
@@ -449,7 +482,12 @@ async def set_workspace_document_ids(
             UPDATE workspaces
             SET {", ".join(set_clauses)}
             WHERE name = $1
-            RETURNING name, soul_understanding_id, protocol_understanding_id, orientation_understanding_id
+            RETURNING
+                name,
+                soul_understanding_id,
+                protocol_understanding_id,
+                orientation_understanding_id,
+                consolidation_understanding_id
             """,
             name,
             *args,
@@ -535,6 +573,7 @@ async def reset_workspace(name: str) -> dict:
                     soul_understanding_id = NULL,
                     protocol_understanding_id = NULL,
                     orientation_understanding_id = NULL,
+                    consolidation_understanding_id = NULL,
                     current_generation = 0,
                     last_consolidated_at = NULL
                 WHERE id = $1
@@ -632,6 +671,7 @@ async def export_workspace(name: str, path: str | Path) -> dict:
                 soul_understanding_id,
                 protocol_understanding_id,
                 orientation_understanding_id,
+                consolidation_understanding_id,
                 current_generation,
                 last_consolidated_at,
                 created_at
@@ -743,6 +783,19 @@ async def export_workspace(name: str, path: str | Path) -> dict:
                 workspace_id,
             )
         ]
+        observation_links = [
+            serialize(row)
+            for row in await conn.fetch(
+                """
+                SELECT l.source_observation_id, l.target_observation_id
+                FROM observation_links l
+                JOIN observations o ON o.id = l.source_observation_id
+                WHERE o.workspace_id = $1
+                ORDER BY l.source_observation_id, l.target_observation_id
+                """,
+                workspace_id,
+            )
+        ]
         perspectives = [
             serialize(row)
             for row in await conn.fetch(
@@ -807,6 +860,7 @@ async def export_workspace(name: str, path: str | Path) -> dict:
         "observation_subjects": observation_subjects,
         "understanding_subjects": understanding_subjects,
         "understanding_sources": understanding_sources,
+        "observation_links": observation_links,
         "perspectives": perspectives,
         "utility_signals": utility_signals,
         "events": events,
@@ -822,6 +876,7 @@ async def export_workspace(name: str, path: str | Path) -> dict:
         "subjects_exported": len(subjects),
         "observations_exported": len(observations),
         "understandings_exported": len(understandings),
+        "observation_links_exported": len(observation_links),
         "perspectives_exported": len(perspectives),
         "utility_signals_exported": len(utility_signals),
         "events_exported": len(events),
@@ -1080,6 +1135,27 @@ async def import_workspace(
                     len(payload["understanding_sources"]),
                 )
 
+            if payload.get("observation_links"):
+                await conn.executemany(
+                    """
+                    INSERT INTO observation_links (source_observation_id, target_observation_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    [
+                        (
+                            observation_id_map[item["source_observation_id"]],
+                            observation_id_map[item["target_observation_id"]],
+                        )
+                        for item in payload["observation_links"]
+                    ],
+                )
+                _emit_import_progress(
+                    progress,
+                    "observation_links",
+                    len(payload["observation_links"]),
+                )
+
             for understanding in understandings:
                 old_superseded_by = understanding.get("superseded_by")
                 if old_superseded_by is not None:
@@ -1125,7 +1201,8 @@ async def import_workspace(
                 SET
                     soul_understanding_id = $2,
                     protocol_understanding_id = $3,
-                    orientation_understanding_id = $4
+                    orientation_understanding_id = $4,
+                    consolidation_understanding_id = $5
                 WHERE id = $1
                 """,
                 workspace_id,
@@ -1142,6 +1219,11 @@ async def import_workspace(
                 (
                     understanding_id_map[source_workspace["orientation_understanding_id"]]
                     if source_workspace.get("orientation_understanding_id") is not None
+                    else None
+                ),
+                (
+                    understanding_id_map[source_workspace["consolidation_understanding_id"]]
+                    if source_workspace.get("consolidation_understanding_id") is not None
                     else None
                 ),
             )
@@ -1516,9 +1598,15 @@ async def list_observations(
             conn,
             [row["id"] for row in rows],
         )
+        observation_links = await _observation_link_ids(
+            conn,
+            [row["id"] for row in rows],
+        )
     result = [serialize(row) for row in rows]
     for item in result:
         item["subject_names"] = subject_names.get(item["id"], [])
+        item["points_to"] = observation_links.get(item["id"], {}).get("points_to", [])
+        item["pointed_to_by"] = observation_links.get(item["id"], {}).get("pointed_to_by", [])
     return result
 
 
@@ -1530,6 +1618,7 @@ async def create_observation(
     kind: str | None = None,
     confidence: float | None = None,
     related_to: list[int] | None = None,
+    points_to: list[int] | None = None,
     session_id: str = "admin-cli",
 ) -> dict:
     """Create one observation through the regular v3 write path."""
@@ -1541,6 +1630,7 @@ async def create_observation(
                 "kind": kind,
                 "confidence": confidence,
                 "related_to": related_to,
+                "points_to": points_to,
             }
         ],
         workspace=_normalize_workspace_name(workspace),
@@ -1590,9 +1680,12 @@ async def show_observation(workspace: str, observation_id: int) -> dict:
             """,
             observation_id,
         )
+        observation_links = await _observation_link_ids(conn, [observation_id])
     result = serialize(row)
     result["subject_names"] = subject_names.get(observation_id, [])
     result["related_understanding_ids"] = [item["understanding_id"] for item in source_rows]
+    result["points_to"] = observation_links.get(observation_id, {}).get("points_to", [])
+    result["pointed_to_by"] = observation_links.get(observation_id, {}).get("pointed_to_by", [])
     return result
 
 
@@ -1761,7 +1854,8 @@ async def delete_understanding(workspace: str, understanding_id: int) -> dict:
                 SET
                     soul_understanding_id = NULLIF(soul_understanding_id, $2),
                     protocol_understanding_id = NULLIF(protocol_understanding_id, $2),
-                    orientation_understanding_id = NULLIF(orientation_understanding_id, $2)
+                    orientation_understanding_id = NULLIF(orientation_understanding_id, $2),
+                    consolidation_understanding_id = NULLIF(consolidation_understanding_id, $2)
                 WHERE id = $1
                 """,
                 workspace_id,
