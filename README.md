@@ -47,6 +47,13 @@ memory-admin database backup backup.sql
 memory-admin database restore backup.sql --yes
 ```
 
+## Onboarding a model
+
+When connecting a new model instance to a workspace for the first time, point it at
+[`docs/onboarding.md`](./docs/onboarding.md). That document explains the data model,
+connection setup, core workflow, and how to bootstrap the workspace special documents
+from the seed files in [`docs/seeds/`](./docs/seeds/).
+
 ## Notes
 
 - MCP interface details: [`MCP_INTERFACE.md`](./MCP_INTERFACE.md)
