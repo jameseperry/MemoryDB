@@ -23,10 +23,18 @@ def create_mcp_server() -> FastMCP:
     mcp = FastMCP(
         name="memory-v3",
         instructions=(
-            "Memory MCP v3 implements the subject/understanding model. "
-            "Use orient at session start, remember for new observations, "
-            "recall or bring_to_mind for retrieval, and Layer 1 tools when "
-            "the higher-level verbs are insufficient."
+            "Memory MCP v3 implements a subject/observation/understanding memory model. "
+            "Subjects are durable regions of aboutness. Observations are atomic evidence-like "
+            "memory items. Understandings are synthesized, revisable summaries built over time. "
+            "Use Layer 2 tools first: orient at session start, remember for new observations, "
+            "bring_to_mind for associative surfacing of possibly relevant context, recall for "
+            "directed retrieval, and update_understanding when an existing synthesis should be "
+            "superseded. Use Layer 1 inspection tools when the higher-level verbs are not enough. "
+            "The special documents have distinct roles: soul is durable stance and attractor, "
+            "protocol is operating guidance for using memory well, orientation is current context, "
+            "and consolidation is guidance for maintenance and synthesis passes. "
+            "In normal interaction mode, orient returns soul, protocol, and orientation. "
+            "In consolidation mode, orient returns soul, consolidation, and orientation."
         ),
         lifespan=lifespan,
     )
