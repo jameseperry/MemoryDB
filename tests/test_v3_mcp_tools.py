@@ -2282,6 +2282,98 @@ async def test_v3_orient_consolidation_mode_returns_consolidation_document(monke
 
 
 @pytest.mark.asyncio
+async def test_v3_orient_consolidation_mode_parses_string_event_detail(monkeypatch):
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "FROM workspaces" in query:
+                return {
+                    "id": 7,
+                    "soul_understanding_id": None,
+                    "protocol_understanding_id": None,
+                    "orientation_understanding_id": None,
+                    "consolidation_understanding_id": None,
+                    "last_consolidated_at": None,
+                }
+            if "INSERT INTO sessions" in query and "RETURNING model_tier" in query:
+                return {"model_tier": "gpt-5.4"}
+            if "INSERT INTO sessions" in query and "RETURNING session_id" in query:
+                return {"session_id": 99}
+            if "FROM events e" in query and "finalize_consolidation" in query:
+                assert args == (7,)
+                return {
+                    "timestamp": datetime(2026, 4, 8, 17, 55, tzinfo=timezone.utc),
+                    "detail": json.dumps(
+                        {
+                            "summary": "String-backed consolidation event",
+                            "expected_generation": 0,
+                            "new_generation": 1,
+                            "updated_understanding_ids": [214],
+                            "created_understanding_ids": [],
+                        }
+                    ),
+                    "session_token": "conversation-42",
+                }
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            if "DELETE FROM surfaced_in_session" in query:
+                return None
+            if "INSERT INTO events" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "SELECT id, content, summary, kind, generation, created_at, superseded_by" in query:
+                assert args == ([],)
+                return []
+            raise AssertionError(query)
+
+        async def fetchval(self, query, *args):
+            if "SELECT COUNT(*)" in query and "FROM subjects s" in query:
+                return 0
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_effective_workspace_name",
+        lambda workspace=None: "james/gpt",
+    )
+
+    result = await tools_module.orient(
+        workspace="james/gpt",
+        mode="consolidation",
+    )
+
+    assert result["last_consolidation_event"] == {
+        "timestamp": "2026-04-08T17:55:00+00:00",
+        "summary": "String-backed consolidation event",
+        "expected_generation": 0,
+        "new_generation": 1,
+        "updated_understanding_ids": [214],
+        "created_understanding_ids": [],
+        "session_id": "conversation-42",
+    }
+
+
+@pytest.mark.asyncio
 async def test_v3_finalize_consolidation_advances_generation_and_records_event(monkeypatch):
     captured: dict[str, object] = {}
 

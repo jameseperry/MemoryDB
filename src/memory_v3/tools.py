@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 from typing import Literal
 
@@ -2143,6 +2144,8 @@ async def orient(
             )
             if event_row is not None:
                 detail = event_row["detail"] or {}
+                if isinstance(detail, str):
+                    detail = json.loads(detail)
                 last_consolidation_event = {
                     "timestamp": event_row["timestamp"].isoformat(),
                     "summary": detail.get("summary"),

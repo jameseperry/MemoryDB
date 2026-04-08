@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sys
-import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,11 @@ import anyio
 import click
 from fastmcp import Client
 from fastmcp.client.transports.http import StreamableHttpTransport
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python < 3.11
+    import tomli as tomllib
 
 
 def _json_default(value: Any) -> str:
