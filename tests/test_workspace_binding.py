@@ -170,6 +170,7 @@ def test_mcp_wrappers_do_not_expose_workspace():
         mcp_tools.recall,
         mcp_tools.reset_seen,
         mcp_tools.set_session_model_tier,
+        mcp_tools.get_workspace_documents,
         mcp_tools.set_workspace_documents,
         mcp_tools.remember,
         mcp_tools.update_understanding,

@@ -36,6 +36,7 @@ def create_mcp_server() -> FastMCP:
     mcp.add_tool(mcp_tools.recall)
     mcp.add_tool(mcp_tools.reset_seen)
     mcp.add_tool(mcp_tools.set_session_model_tier)
+    mcp.add_tool(mcp_tools.get_workspace_documents)
     mcp.add_tool(mcp_tools.set_workspace_documents)
     mcp.add_tool(mcp_tools.remember)
     mcp.add_tool(mcp_tools.update_understanding)

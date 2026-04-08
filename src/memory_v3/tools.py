@@ -1857,6 +1857,35 @@ async def set_session_model_tier(
     }
 
 
+async def get_workspace_documents(
+    workspace: str | None = None,
+) -> dict:
+    """Return the active workspace special-document pointer IDs."""
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+        row = await conn.fetchrow(
+            """
+            SELECT
+                soul_understanding_id,
+                protocol_understanding_id,
+                orientation_understanding_id
+            FROM workspaces
+            WHERE id = $1
+            """,
+            workspace_id,
+        )
+        if row is None:
+            raise ValueError(f"Workspace ID {workspace_id} not found")
+
+    return {
+        "soul_understanding_id": row["soul_understanding_id"],
+        "protocol_understanding_id": row["protocol_understanding_id"],
+        "orientation_understanding_id": row["orientation_understanding_id"],
+    }
+
+
 async def set_workspace_documents(
     soul_understanding_id: int | None = None,
     protocol_understanding_id: int | None = None,

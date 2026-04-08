@@ -97,6 +97,11 @@ async def set_session_model_tier(model_tier: str | None = None) -> dict:
     return await tools.set_session_model_tier(model_tier=model_tier)
 
 
+async def get_workspace_documents() -> dict:
+    _log_tool_call("get_workspace_documents")
+    return await tools.get_workspace_documents()
+
+
 async def set_workspace_documents(
     soul_understanding_id: int | None = None,
     protocol_understanding_id: int | None = None,

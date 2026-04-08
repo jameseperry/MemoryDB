@@ -942,6 +942,30 @@ async def test_v3_recall_question_mode_returns_best_answer_provenance(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_v3_get_workspace_documents_wrapper(monkeypatch):
+    async def fake_get_workspace_documents():
+        return {
+            "soul_understanding_id": 11,
+            "protocol_understanding_id": 12,
+            "orientation_understanding_id": None,
+        }
+
+    monkeypatch.setattr(
+        "memory_v3.mcp_tools.tools.get_workspace_documents",
+        fake_get_workspace_documents,
+    )
+    monkeypatch.setattr("memory_v3.mcp_tools._log_tool_call", lambda name: None)
+
+    result = await mcp_tools.get_workspace_documents()
+
+    assert result == {
+        "soul_understanding_id": 11,
+        "protocol_understanding_id": 12,
+        "orientation_understanding_id": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_v3_set_workspace_documents_wrapper_forwards_ids(monkeypatch):
     async def fake_set_workspace_documents(
         soul_understanding_id=None,
@@ -1284,6 +1308,50 @@ async def test_v3_orient_uses_strict_generation_for_pending_subjects(monkeypatch
     assert result["pending_consolidation_count"] == 0
     assert "o.generation > u.generation" in captured["pending_subjects_query"]
     assert "o.generation >= u.generation" not in captured["pending_subjects_query"]
+
+
+@pytest.mark.asyncio
+async def test_v3_get_workspace_documents_reads_pointer_ids(monkeypatch):
+    class FakeConn:
+        async def fetchval(self, query, *args):
+            if "SELECT id FROM workspaces" in query:
+                assert args == ("james/gpt",)
+                return 7
+            raise AssertionError(query)
+
+        async def fetchrow(self, query, *args):
+            if "SELECT" in query and "soul_understanding_id" in query:
+                assert args == (7,)
+                return {
+                    "soul_understanding_id": 11,
+                    "protocol_understanding_id": 12,
+                    "orientation_understanding_id": None,
+                }
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+
+    result = await tools_module.get_workspace_documents(workspace="james/gpt")
+
+    assert result == {
+        "soul_understanding_id": 11,
+        "protocol_understanding_id": 12,
+        "orientation_understanding_id": None,
+    }
 
 
 @pytest.mark.asyncio
