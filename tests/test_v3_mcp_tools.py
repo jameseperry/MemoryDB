@@ -1882,11 +1882,14 @@ async def test_v3_orient_rejects_superseded_special_pointer(monkeypatch):
             raise AssertionError(query)
 
         async def execute(self, query, *args):
-            if "DELETE FROM surfaced_in_session" in query:
+            if "UPDATE sessions" in query and "seen_set_token = 0" in query:
                 return None
             raise AssertionError(query)
 
         async def fetch(self, query, *args):
+            if "DELETE FROM surfaced_in_session" in query:
+                assert args == (7, "conversation-42")
+                return []
             if "SELECT id, content, summary, kind, generation, created_at, superseded_by" in query:
                 assert args == ([11, 13],)
                 return [
@@ -1967,8 +1970,9 @@ async def test_v3_orient_uses_strict_generation_for_pending_subjects(monkeypatch
             raise AssertionError(query)
 
         async def execute(self, query, *args):
-            if "DELETE FROM surfaced_in_session" in query:
+            if "UPDATE sessions" in query and "seen_set_token = 0" in query:
                 assert args == (7, "conversation-42")
+                captured["reset_seen_set_token"] = True
                 return None
             if "INSERT INTO events" in query:
                 assert args == (
@@ -1978,6 +1982,12 @@ async def test_v3_orient_uses_strict_generation_for_pending_subjects(monkeypatch
                     json.dumps({"session_reset": True}),
                 )
                 return None
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "DELETE FROM surfaced_in_session" in query:
+                assert args == (7, "conversation-42")
+                return []
             raise AssertionError(query)
 
         async def fetchval(self, query, *args):
@@ -2014,6 +2024,7 @@ async def test_v3_orient_uses_strict_generation_for_pending_subjects(monkeypatch
     result = await tools_module.orient(workspace="james/gpt")
 
     assert result["pending_consolidation_count"] == 0
+    assert captured["reset_seen_set_token"] is True
     assert "o.generation > u.generation" in captured["pending_subjects_query"]
     assert "o.generation >= u.generation" not in captured["pending_subjects_query"]
 
@@ -2214,13 +2225,16 @@ async def test_v3_orient_consolidation_mode_returns_consolidation_document(monke
             raise AssertionError(query)
 
         async def execute(self, query, *args):
-            if "DELETE FROM surfaced_in_session" in query:
+            if "UPDATE sessions" in query and "seen_set_token = 0" in query:
                 return None
             if "INSERT INTO events" in query:
                 return None
             raise AssertionError(query)
 
         async def fetch(self, query, *args):
+            if "DELETE FROM surfaced_in_session" in query:
+                assert args == (7, "conversation-42")
+                return []
             if "SELECT id, content, summary, kind, generation, created_at, superseded_by" in query:
                 assert args == ([11, 12, 14, 13],)
                 return [
@@ -2353,13 +2367,16 @@ async def test_v3_orient_consolidation_mode_parses_string_event_detail(monkeypat
             raise AssertionError(query)
 
         async def execute(self, query, *args):
-            if "DELETE FROM surfaced_in_session" in query:
+            if "UPDATE sessions" in query and "seen_set_token = 0" in query:
                 return None
             if "INSERT INTO events" in query:
                 return None
             raise AssertionError(query)
 
         async def fetch(self, query, *args):
+            if "DELETE FROM surfaced_in_session" in query:
+                assert args == (7, "conversation-42")
+                return []
             if "SELECT id, content, summary, kind, generation, created_at, superseded_by" in query:
                 assert args == ([],)
                 return []

@@ -297,6 +297,39 @@ async def _advance_heartbeat_token(
     return token
 
 
+async def _reset_seen_state(
+    conn: asyncpg.Connection,
+    *,
+    workspace_id: int,
+    session_id: str,
+) -> int:
+    deleted_rows = await conn.fetch(
+        """
+        DELETE FROM surfaced_in_session
+        WHERE session_id = (
+            SELECT session_id
+            FROM sessions
+            WHERE workspace_id = $1
+              AND session_token = $2
+        )
+        RETURNING id
+        """,
+        workspace_id,
+        session_id,
+    )
+    await conn.execute(
+        """
+        UPDATE sessions
+        SET seen_set_token = 0, updated_at = NOW()
+        WHERE workspace_id = $1
+          AND session_token = $2
+        """,
+        workspace_id,
+        session_id,
+    )
+    return len(deleted_rows)
+
+
 def _normalize_model_tier(model_tier: str | None) -> str | None:
     if model_tier is None:
         return None
@@ -2060,18 +2093,10 @@ async def orient(
             session_id=effective_session_id,
             model_tier=model_tier,
         )
-        await conn.execute(
-            """
-            DELETE FROM surfaced_in_session
-            WHERE session_id = (
-                SELECT session_id
-                FROM sessions
-                WHERE workspace_id = $1
-                  AND session_token = $2
-            )
-            """,
-            workspace_id,
-            effective_session_id,
+        await _reset_seen_state(
+            conn,
+            workspace_id=workspace_id,
+            session_id=effective_session_id,
         )
 
         pointer_ids = [
@@ -2455,29 +2480,20 @@ async def reset_seen(
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
-        deleted_rows = await conn.fetch(
-            """
-            DELETE FROM surfaced_in_session
-            WHERE session_id = (
-                SELECT session_id
-                FROM sessions
-                WHERE workspace_id = $1
-                  AND session_token = $2
-            )
-            RETURNING id
-            """,
-            workspace_id,
-            effective_session_id,
+        cleared_count = await _reset_seen_state(
+            conn,
+            workspace_id=workspace_id,
+            session_id=effective_session_id,
         )
         await record_event(
             conn,
             workspace_id=workspace_id,
             session_id=effective_session_id,
             operation="reset_seen",
-            detail={"cleared": len(deleted_rows)},
+            detail={"cleared": cleared_count},
         )
 
-    return {"cleared": len(deleted_rows)}
+    return {"cleared": cleared_count}
 
 
 async def bring_to_mind(
