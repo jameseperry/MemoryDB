@@ -11,14 +11,14 @@ class Settings(BaseSettings):
     )
 
     async_database_url: str = Field(
-        default="postgresql://memory:memory@localhost:5432/memory_v3",
+        default="postgresql://memory:memory@localhost:19432/memory_v3",
         validation_alias=AliasChoices(
             "ASYNC_DATABASE_URL_V3",
             "MEMORY_V3_ASYNC_DATABASE_URL",
         ),
     )
     database_url: str = Field(
-        default="postgresql+psycopg2://memory:memory@localhost:5432/memory_v3",
+        default="postgresql+psycopg2://memory:memory@localhost:19432/memory_v3",
         validation_alias=AliasChoices(
             "DATABASE_URL_V3",
             "MEMORY_V3_DATABASE_URL",
