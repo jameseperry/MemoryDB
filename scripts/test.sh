@@ -22,7 +22,7 @@ done
 
 # --- Run migrations ---
 echo "==> Running migrations..."
-DATABASE_URL="${DATABASE_URL:-postgresql+psycopg2://memory:memory@localhost:5432/memory}" \
+DATABASE_URL="${DATABASE_URL:-postgresql+psycopg2://memory:memory@localhost:19432/memory}" \
     .venv/bin/alembic upgrade head
 
 # --- Run tests ---
