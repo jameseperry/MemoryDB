@@ -64,6 +64,7 @@ class _FakeConn:
         self.workspace_row = workspace_row
         self.understanding_rows = understanding_rows or {}
         self.updated_workspace_row = updated_workspace_row
+        self.named_understandings = {}
 
     async def fetch(self, query, *args):
         if "SELECT name, created_at" in query and "ORDER BY name" in query:
@@ -83,6 +84,17 @@ class _FakeConn:
             return self.understanding_rows.get(args[0])
         if "UPDATE workspaces" in query:
             return self.updated_workspace_row
+        raise AssertionError(query)
+
+    async def execute(self, query, *args):
+        if "INSERT INTO named_understandings" in query:
+            _, name, understanding_id = args
+            self.named_understandings[name] = understanding_id
+            return None
+        if "DELETE FROM named_understandings" in query:
+            _, name = args
+            self.named_understandings.pop(name, None)
+            return None
         raise AssertionError(query)
 
 
@@ -202,6 +214,11 @@ async def test_v3_workspace_set_document_ids(monkeypatch):
         "protocol_understanding_id": None,
         "orientation_understanding_id": 12,
         "consolidation_understanding_id": 13,
+    }
+    assert conn.named_understandings == {
+        "soul": 11,
+        "orientation": 12,
+        "consolidation": 13,
     }
 
 

@@ -81,6 +81,8 @@ def test_v3_wrappers_do_not_expose_workspace_or_session():
         mcp_tools.reset_seen,
         mcp_tools.set_session_model_tier,
         mcp_tools.set_workspace_documents,
+        mcp_tools.get_named_understandings,
+        mcp_tools.set_named_understanding,
         mcp_tools.remember,
         mcp_tools.update_understanding,
         mcp_tools.finalize_consolidation,
@@ -1231,6 +1233,42 @@ async def test_v3_set_workspace_documents_wrapper_forwards_ids(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_v3_get_named_understandings_wrapper(monkeypatch):
+    async def fake_get_named_understandings(names=None):
+        assert names == ["design_note", "protocol"]
+        return {"design_note": 41, "protocol": 12}
+
+    monkeypatch.setattr(
+        "memory_v3.mcp_tools.tools.get_named_understandings",
+        fake_get_named_understandings,
+    )
+    monkeypatch.setattr("memory_v3.mcp_tools._log_tool_call", lambda name: None)
+
+    result = await mcp_tools.get_named_understandings(["design_note", "protocol"])
+
+    assert result == {"design_note": 41, "protocol": 12}
+
+
+@pytest.mark.asyncio
+async def test_v3_set_named_understanding_wrapper(monkeypatch):
+    async def fake_set_named_understanding(name, understanding_id=None):
+        return {"name": name, "understanding_id": understanding_id}
+
+    monkeypatch.setattr(
+        "memory_v3.mcp_tools.tools.set_named_understanding",
+        fake_set_named_understanding,
+    )
+    monkeypatch.setattr("memory_v3.mcp_tools._log_tool_call", lambda name: None)
+
+    result = await mcp_tools.set_named_understanding(
+        name="design_note",
+        understanding_id=41,
+    )
+
+    assert result == {"name": "design_note", "understanding_id": 41}
+
+
+@pytest.mark.asyncio
 async def test_v3_update_understanding_wrapper_uses_new_api(monkeypatch):
     async def fake_update_understanding(
         understanding_id,
@@ -1679,6 +1717,9 @@ async def test_v3_delete_understanding_deletes_current_session_draft(monkeypatch
             raise AssertionError(query)
 
         async def execute(self, query, *args):
+            if "DELETE FROM named_understandings" in query:
+                captured["clear_named_understandings"] = args
+                return "DELETE 0"
             if "UPDATE subjects" in query:
                 captured["clear_subjects"] = args
                 return "UPDATE 0"
@@ -1732,6 +1773,7 @@ async def test_v3_delete_understanding_deletes_current_session_draft(monkeypatch
     result = await tools_module.delete_understanding(33, workspace="james/gpt")
 
     assert result == {"id": 33, "deleted": True}
+    assert captured["clear_named_understandings"] == (33,)
     assert captured["clear_subjects"] == (33,)
     assert captured["clear_workspaces"] == (33,)
     assert captured["delete"] == (33,)
@@ -1890,6 +1932,12 @@ async def test_v3_orient_rejects_superseded_special_pointer(monkeypatch):
             if "DELETE FROM surfaced_in_session" in query:
                 assert args == (7, "conversation-42")
                 return []
+            if "FROM named_understandings" in query:
+                assert args == (7, ["soul", "protocol", "orientation", "consolidation"])
+                return [
+                    {"name": "soul", "understanding_id": 11},
+                    {"name": "consolidation", "understanding_id": 13},
+                ]
             if "SELECT id, content, summary, kind, generation, created_at, superseded_by" in query:
                 assert args == ([11, 13],)
                 return [
@@ -1988,6 +2036,9 @@ async def test_v3_orient_uses_strict_generation_for_pending_subjects(monkeypatch
             if "DELETE FROM surfaced_in_session" in query:
                 assert args == (7, "conversation-42")
                 return []
+            if "FROM named_understandings" in query:
+                assert args == (7, ["soul", "protocol", "orientation", "consolidation"])
+                return []
             raise AssertionError(query)
 
         async def fetchval(self, query, *args):
@@ -2042,11 +2093,21 @@ async def test_v3_get_workspace_documents_reads_pointer_ids(monkeypatch):
             if "SELECT" in query and "soul_understanding_id" in query:
                 assert args == (7,)
                 return {
-                    "soul_understanding_id": 11,
-                    "protocol_understanding_id": 12,
-                    "orientation_understanding_id": None,
-                    "consolidation_understanding_id": 13,
+                    "soul_understanding_id": 91,
+                    "protocol_understanding_id": 92,
+                    "orientation_understanding_id": 93,
+                    "consolidation_understanding_id": 94,
                 }
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "FROM named_understandings" in query:
+                assert args == (7, ["soul", "protocol", "orientation", "consolidation"])
+                return [
+                    {"name": "soul", "understanding_id": 11},
+                    {"name": "protocol", "understanding_id": 12},
+                    {"name": "consolidation", "understanding_id": 13},
+                ]
             raise AssertionError(query)
 
     class FakeAcquire:
@@ -2070,14 +2131,14 @@ async def test_v3_get_workspace_documents_reads_pointer_ids(monkeypatch):
     assert result == {
         "soul_understanding_id": 11,
         "protocol_understanding_id": 12,
-        "orientation_understanding_id": None,
+        "orientation_understanding_id": 93,
         "consolidation_understanding_id": 13,
     }
 
 
 @pytest.mark.asyncio
 async def test_v3_set_workspace_documents_validates_active_understandings(monkeypatch):
-    captured = {}
+    captured = {"named": {}}
 
     class FakeConn:
         async def fetchval(self, query, *args):
@@ -2118,24 +2179,32 @@ async def test_v3_set_workspace_documents_validates_active_understandings(monkey
                         "superseded_by": None,
                     },
                 ]
+            if "FROM named_understandings" in query:
+                assert args == (7, ["soul", "protocol", "orientation", "consolidation"])
+                return [
+                    {"name": name, "understanding_id": understanding_id}
+                    for name, understanding_id in sorted(captured["named"].items())
+                ]
             raise AssertionError(query)
 
         async def fetchrow(self, query, *args):
-            if "UPDATE workspaces" in query:
-                captured["update_query"] = query
-                captured["update_args"] = args
-                return {
-                    "soul_understanding_id": 11,
-                    "protocol_understanding_id": 12,
-                    "orientation_understanding_id": None,
-                    "consolidation_understanding_id": 13,
-                }
             if "INSERT INTO sessions" in query:
                 assert args == (7, "conversation-42")
                 return {"session_id": 99}
             raise AssertionError(query)
 
         async def execute(self, query, *args):
+            if "INSERT INTO named_understandings" in query:
+                _, name, understanding_id = args
+                captured["named"][name] = understanding_id
+                return None
+            if "DELETE FROM named_understandings" in query:
+                _, name = args
+                captured["named"].pop(name, None)
+                return None
+            if "UPDATE workspaces" in query and "soul_understanding_id = (" in query:
+                captured["synced_workspace_columns"] = True
+                return None
             if "INSERT INTO events" in query:
                 captured["event_args"] = args
                 return None
@@ -2174,10 +2243,12 @@ async def test_v3_set_workspace_documents_validates_active_understandings(monkey
         "orientation_understanding_id": None,
         "consolidation_understanding_id": 13,
     }
-    assert "soul_understanding_id = $2" in captured["update_query"]
-    assert "protocol_understanding_id = $3" in captured["update_query"]
-    assert "consolidation_understanding_id = $4" in captured["update_query"]
-    assert captured["update_args"] == (7, 11, 12, 13)
+    assert captured["named"] == {
+        "consolidation": 13,
+        "protocol": 12,
+        "soul": 11,
+    }
+    assert captured["synced_workspace_columns"] is True
     assert captured["event_args"] == (
         7,
         99,
@@ -2190,6 +2261,133 @@ async def test_v3_set_workspace_documents_validates_active_understandings(monkey
             }
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_v3_get_named_understandings_reads_requested_names(monkeypatch):
+    class FakeConn:
+        async def fetchval(self, query, *args):
+            if "SELECT id FROM workspaces" in query:
+                assert args == ("james/gpt",)
+                return 7
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "FROM named_understandings" in query:
+                assert args == (7, ["design_note", "protocol"])
+                return [{"name": "protocol", "understanding_id": 12}]
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+
+    result = await tools_module.get_named_understandings(
+        names=["design_note", "protocol"],
+        workspace="james/gpt",
+    )
+
+    assert result == {
+        "design_note": None,
+        "protocol": 12,
+    }
+
+
+@pytest.mark.asyncio
+async def test_v3_set_named_understanding_sets_and_clears_name(monkeypatch):
+    captured = {"named": {}}
+
+    class FakeConn:
+        async def fetchval(self, query, *args):
+            if "SELECT id FROM workspaces" in query:
+                assert args == ("james/gpt",)
+                return 7
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "SELECT id, content, summary, kind, generation, created_at, superseded_by" in query:
+                assert args == ([41],)
+                return [
+                    {
+                        "id": 41,
+                        "content": "design note",
+                        "summary": "design note",
+                        "kind": "relationship",
+                        "generation": 0,
+                        "created_at": datetime(2026, 4, 2, tzinfo=timezone.utc),
+                        "superseded_by": None,
+                    }
+                ]
+            raise AssertionError(query)
+
+        async def fetchrow(self, query, *args):
+            if "INSERT INTO sessions" in query:
+                assert args == (7, "conversation-42")
+                return {"session_id": 99}
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            if "INSERT INTO named_understandings" in query:
+                _, name, understanding_id = args
+                captured["named"][name] = understanding_id
+                return None
+            if "DELETE FROM named_understandings" in query:
+                _, name = args
+                captured["named"].pop(name, None)
+                return None
+            if "UPDATE workspaces" in query and "soul_understanding_id = (" in query:
+                return None
+            if "INSERT INTO events" in query:
+                captured.setdefault("events", []).append(args)
+                return None
+            raise AssertionError(query)
+
+    class FakeAcquire:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return FakeAcquire()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    monkeypatch.setattr("memory_v3.tools.get_pool", fake_get_pool)
+    monkeypatch.setattr(
+        "memory_v3.tools.resolve_optional_session_id",
+        lambda session_id=None: "conversation-42",
+    )
+
+    created = await tools_module.set_named_understanding(
+        "design_note",
+        41,
+        workspace="james/gpt",
+    )
+    cleared = await tools_module.set_named_understanding(
+        "design_note",
+        None,
+        workspace="james/gpt",
+    )
+
+    assert created == {"name": "design_note", "understanding_id": 41}
+    assert cleared == {"name": "design_note", "understanding_id": None}
+    assert captured["named"] == {}
 
 
 @pytest.mark.asyncio
@@ -2235,6 +2433,14 @@ async def test_v3_orient_consolidation_mode_returns_consolidation_document(monke
             if "DELETE FROM surfaced_in_session" in query:
                 assert args == (7, "conversation-42")
                 return []
+            if "FROM named_understandings" in query:
+                assert args == (7, ["soul", "protocol", "orientation", "consolidation"])
+                return [
+                    {"name": "soul", "understanding_id": 11},
+                    {"name": "protocol", "understanding_id": 12},
+                    {"name": "orientation", "understanding_id": 14},
+                    {"name": "consolidation", "understanding_id": 13},
+                ]
             if "SELECT id, content, summary, kind, generation, created_at, superseded_by" in query:
                 assert args == ([11, 12, 14, 13],)
                 return [
@@ -2376,6 +2582,9 @@ async def test_v3_orient_consolidation_mode_parses_string_event_detail(monkeypat
         async def fetch(self, query, *args):
             if "DELETE FROM surfaced_in_session" in query:
                 assert args == (7, "conversation-42")
+                return []
+            if "FROM named_understandings" in query:
+                assert args == (7, ["soul", "protocol", "orientation", "consolidation"])
                 return []
             if "SELECT id, content, summary, kind, generation, created_at, superseded_by" in query:
                 assert args == ([],)

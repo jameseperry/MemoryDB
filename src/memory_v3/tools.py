@@ -23,6 +23,14 @@ from memory_v3.db import (
 from memory_v3.embeddings import embed_targets, search_embeddings
 
 
+SPECIAL_UNDERSTANDING_NAME_TO_COLUMN = {
+    "soul": "soul_understanding_id",
+    "protocol": "protocol_understanding_id",
+    "orientation": "orientation_understanding_id",
+    "consolidation": "consolidation_understanding_id",
+}
+
+
 def _normalize_subject_names(subject_names: list[str]) -> list[str]:
     """Normalize, validate, and deduplicate subject names while preserving order."""
     normalized: list[str] = []
@@ -98,6 +106,159 @@ async def _require_subjects(
     if missing:
         raise ValueError(f"Subjects not found: {missing}")
     return [rows_by_name[name] for name in _normalize_subject_names(subject_names)]
+
+
+def _normalize_understanding_name(name: str) -> str:
+    normalized = name.strip()
+    if not normalized:
+        raise ValueError("Understanding name cannot be empty")
+    return normalized
+
+
+async def _fetch_named_understanding_map(
+    conn: asyncpg.Connection,
+    *,
+    workspace_id: int,
+    names: list[str] | None = None,
+) -> dict[str, int]:
+    if names is None:
+        rows = await conn.fetch(
+            """
+            SELECT name, understanding_id
+            FROM named_understandings
+            WHERE workspace_id = $1
+            ORDER BY name
+            """,
+            workspace_id,
+        )
+    else:
+        if not names:
+            return {}
+        rows = await conn.fetch(
+            """
+            SELECT name, understanding_id
+            FROM named_understandings
+            WHERE workspace_id = $1
+              AND name = ANY($2)
+            ORDER BY name
+            """,
+            workspace_id,
+            names,
+        )
+    return {row["name"]: row["understanding_id"] for row in rows}
+
+
+async def _sync_special_understanding_columns(
+    conn: asyncpg.Connection,
+    *,
+    workspace_id: int,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE workspaces
+        SET
+            soul_understanding_id = (
+                SELECT understanding_id
+                FROM named_understandings
+                WHERE workspace_id = $1
+                  AND name = 'soul'
+            ),
+            protocol_understanding_id = (
+                SELECT understanding_id
+                FROM named_understandings
+                WHERE workspace_id = $1
+                  AND name = 'protocol'
+            ),
+            orientation_understanding_id = (
+                SELECT understanding_id
+                FROM named_understandings
+                WHERE workspace_id = $1
+                  AND name = 'orientation'
+            ),
+            consolidation_understanding_id = (
+                SELECT understanding_id
+                FROM named_understandings
+                WHERE workspace_id = $1
+                  AND name = 'consolidation'
+            )
+        WHERE id = $1
+        """,
+        workspace_id,
+    )
+
+
+async def _set_named_understanding(
+    conn: asyncpg.Connection,
+    *,
+    workspace_id: int,
+    name: str,
+    understanding_id: int | None,
+) -> None:
+    await _set_named_understanding_map(
+        conn,
+        workspace_id=workspace_id,
+        name_to_understanding_id={name: understanding_id},
+    )
+
+
+async def _set_named_understanding_map(
+    conn: asyncpg.Connection,
+    *,
+    workspace_id: int,
+    name_to_understanding_id: dict[str, int | None],
+) -> None:
+    normalized = {
+        _normalize_understanding_name(name): understanding_id
+        for name, understanding_id in name_to_understanding_id.items()
+    }
+    if not normalized:
+        return
+    for name, understanding_id in normalized.items():
+        if understanding_id is None:
+            await conn.execute(
+                """
+                DELETE FROM named_understandings
+                WHERE workspace_id = $1
+                  AND name = $2
+                """,
+                workspace_id,
+                name,
+            )
+        else:
+            await conn.execute(
+                """
+                INSERT INTO named_understandings (workspace_id, name, understanding_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (workspace_id, name)
+                    DO UPDATE SET understanding_id = EXCLUDED.understanding_id
+                """,
+                workspace_id,
+                name,
+                understanding_id,
+            )
+    if any(name in SPECIAL_UNDERSTANDING_NAME_TO_COLUMN for name in normalized):
+        await _sync_special_understanding_columns(conn, workspace_id=workspace_id)
+
+
+async def _repoint_named_understandings(
+    conn: asyncpg.Connection,
+    *,
+    workspace_id: int,
+    old_understanding_id: int,
+    new_understanding_id: int,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE named_understandings
+        SET understanding_id = $3
+        WHERE workspace_id = $1
+          AND understanding_id = $2
+        """,
+        workspace_id,
+        old_understanding_id,
+        new_understanding_id,
+    )
+    await _sync_special_understanding_columns(conn, workspace_id=workspace_id)
 
 
 async def _get_subject_names_for_targets(
@@ -199,6 +360,13 @@ async def _clear_understanding_pointers(
     *,
     understanding_id: int,
 ) -> None:
+    await conn.execute(
+        """
+        DELETE FROM named_understandings
+        WHERE understanding_id = $1
+        """,
+        understanding_id,
+    )
     await conn.execute(
         """
         UPDATE subjects
@@ -542,28 +710,32 @@ async def _update_special_pointer(
             understanding_id,
         )
     elif kind == "soul":
-        await conn.execute(
-            "UPDATE workspaces SET soul_understanding_id = $2 WHERE id = $1",
-            workspace_id,
-            understanding_id,
+        await _set_named_understanding(
+            conn,
+            workspace_id=workspace_id,
+            name="soul",
+            understanding_id=understanding_id,
         )
     elif kind == "protocol":
-        await conn.execute(
-            "UPDATE workspaces SET protocol_understanding_id = $2 WHERE id = $1",
-            workspace_id,
-            understanding_id,
+        await _set_named_understanding(
+            conn,
+            workspace_id=workspace_id,
+            name="protocol",
+            understanding_id=understanding_id,
         )
     elif kind == "orientation":
-        await conn.execute(
-            "UPDATE workspaces SET orientation_understanding_id = $2 WHERE id = $1",
-            workspace_id,
-            understanding_id,
+        await _set_named_understanding(
+            conn,
+            workspace_id=workspace_id,
+            name="orientation",
+            understanding_id=understanding_id,
         )
     elif kind == "consolidation":
-        await conn.execute(
-            "UPDATE workspaces SET consolidation_understanding_id = $2 WHERE id = $1",
-            workspace_id,
-            understanding_id,
+        await _set_named_understanding(
+            conn,
+            workspace_id=workspace_id,
+            name="consolidation",
+            understanding_id=understanding_id,
         )
 
 
@@ -1571,6 +1743,12 @@ async def update_understanding(
             understanding_id,
             new_row["id"],
         )
+        await _repoint_named_understandings(
+            conn,
+            workspace_id=workspace_id,
+            old_understanding_id=understanding_id,
+            new_understanding_id=new_row["id"],
+        )
 
         await _update_special_pointer(
             conn,
@@ -2087,6 +2265,19 @@ async def orient(
             raise ValueError(f"Workspace '{workspace_name}' not found")
 
         workspace_id = workspace_row["id"]
+        named_understanding_ids = {
+            "soul": workspace_row["soul_understanding_id"],
+            "protocol": workspace_row["protocol_understanding_id"],
+            "orientation": workspace_row["orientation_understanding_id"],
+            "consolidation": workspace_row["consolidation_understanding_id"],
+        }
+        named_understanding_ids.update(
+            await _fetch_named_understanding_map(
+                conn,
+                workspace_id=workspace_id,
+                names=list(SPECIAL_UNDERSTANDING_NAME_TO_COLUMN),
+            )
+        )
         await _set_session_model_tier(
             conn,
             workspace_id=workspace_id,
@@ -2102,10 +2293,10 @@ async def orient(
         pointer_ids = [
             pointer_id
             for pointer_id in [
-                workspace_row["soul_understanding_id"],
-                workspace_row["protocol_understanding_id"],
-                workspace_row["orientation_understanding_id"],
-                workspace_row["consolidation_understanding_id"],
+                named_understanding_ids["soul"],
+                named_understanding_ids["protocol"],
+                named_understanding_ids["orientation"],
+                named_understanding_ids["consolidation"],
             ]
             if pointer_id is not None
         ]
@@ -2226,7 +2417,7 @@ async def orient(
         return payload
 
     soul_payload = _pointer_payload(
-        workspace_row["soul_understanding_id"],
+        named_understanding_ids["soul"],
         (
             "CRITICAL: This content establishes the fundamental character "
             "and values for this session. It must be preserved during "
@@ -2234,14 +2425,14 @@ async def orient(
         ),
     )
     orientation_payload = _pointer_payload(
-        workspace_row["orientation_understanding_id"],
+        named_understanding_ids["orientation"],
         None,
     )
     if mode == "interaction":
         documents = {
             "soul": soul_payload,
             "protocol": _pointer_payload(
-                workspace_row["protocol_understanding_id"],
+                named_understanding_ids["protocol"],
                 (
                     "CRITICAL: This content contains operational rules required "
                     "for correct system behaviour. Preserve during compaction."
@@ -2253,7 +2444,7 @@ async def orient(
         documents = {
             "soul": soul_payload,
             "consolidation": _pointer_payload(
-                workspace_row["consolidation_understanding_id"],
+                named_understanding_ids["consolidation"],
                 (
                     "CRITICAL: This content contains consolidation guidance for "
                     "memory maintenance and synthesis. Preserve during compaction."
@@ -2382,7 +2573,7 @@ async def get_workspace_documents(
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace)
-        row = await conn.fetchrow(
+        workspace_row = await conn.fetchrow(
             """
             SELECT
                 soul_understanding_id,
@@ -2394,14 +2585,27 @@ async def get_workspace_documents(
             """,
             workspace_id,
         )
-        if row is None:
+        if workspace_row is None:
             raise ValueError(f"Workspace ID {workspace_id} not found")
+        named_understanding_ids = {
+            "soul": workspace_row["soul_understanding_id"],
+            "protocol": workspace_row["protocol_understanding_id"],
+            "orientation": workspace_row["orientation_understanding_id"],
+            "consolidation": workspace_row["consolidation_understanding_id"],
+        }
+        named_understanding_ids.update(
+            await _fetch_named_understanding_map(
+                conn,
+                workspace_id=workspace_id,
+                names=list(SPECIAL_UNDERSTANDING_NAME_TO_COLUMN),
+            )
+        )
 
     return {
-        "soul_understanding_id": row["soul_understanding_id"],
-        "protocol_understanding_id": row["protocol_understanding_id"],
-        "orientation_understanding_id": row["orientation_understanding_id"],
-        "consolidation_understanding_id": row["consolidation_understanding_id"],
+        "soul_understanding_id": named_understanding_ids["soul"],
+        "protocol_understanding_id": named_understanding_ids["protocol"],
+        "orientation_understanding_id": named_understanding_ids["orientation"],
+        "consolidation_understanding_id": named_understanding_ids["consolidation"],
     }
 
 
@@ -2439,23 +2643,26 @@ async def set_workspace_documents(
             allow_missing=False,
             context="Workspace special understanding pointer",
         )
-        set_clauses = [
-            f"{column} = ${index}"
-            for index, column in enumerate(provided_updates, start=2)
-        ]
-        row = await conn.fetchrow(
-            f"""
-            UPDATE workspaces
-            SET {", ".join(set_clauses)}
-            WHERE id = $1
-            RETURNING
-                soul_understanding_id,
-                protocol_understanding_id,
-                orientation_understanding_id,
-                consolidation_understanding_id
-            """,
-            workspace_id,
-            *provided_updates.values(),
+        await _set_named_understanding_map(
+            conn,
+            workspace_id=workspace_id,
+            name_to_understanding_id={
+                column.removesuffix("_understanding_id"): value
+                for column, value in provided_updates.items()
+            },
+        )
+        current_named_understanding_ids = {
+            "soul": None,
+            "protocol": None,
+            "orientation": None,
+            "consolidation": None,
+        }
+        current_named_understanding_ids.update(
+            await _fetch_named_understanding_map(
+                conn,
+                workspace_id=workspace_id,
+                names=list(SPECIAL_UNDERSTANDING_NAME_TO_COLUMN),
+            )
         )
         await record_event(
             conn,
@@ -2465,7 +2672,79 @@ async def set_workspace_documents(
             detail=provided_updates,
         )
 
-    return dict(row)
+    return {
+        "soul_understanding_id": current_named_understanding_ids["soul"],
+        "protocol_understanding_id": current_named_understanding_ids["protocol"],
+        "orientation_understanding_id": current_named_understanding_ids["orientation"],
+        "consolidation_understanding_id": current_named_understanding_ids["consolidation"],
+    }
+
+
+async def get_named_understandings(
+    names: list[str] | None = None,
+    workspace: str | None = None,
+) -> dict[str, int | None]:
+    """Return named understanding IDs for the current workspace."""
+    normalized_names = (
+        [_normalize_understanding_name(name) for name in names]
+        if names is not None
+        else None
+    )
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+        mapping = await _fetch_named_understanding_map(
+            conn,
+            workspace_id=workspace_id,
+            names=normalized_names,
+        )
+    if normalized_names is None:
+        return mapping
+    return {name: mapping.get(name) for name in normalized_names}
+
+
+async def set_named_understanding(
+    name: str,
+    understanding_id: int | None = None,
+    workspace: str | None = None,
+    session_id: str | None = None,
+    readonly: bool | None = None,
+) -> dict:
+    """Assign or clear a name for an active understanding in the current workspace."""
+    ensure_request_writable(readonly)
+    normalized_name = _normalize_understanding_name(name)
+    pool = await get_pool()
+    effective_session_id = resolve_optional_session_id(session_id)
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+        if understanding_id is not None:
+            await _fetch_active_understandings_by_id(
+                conn,
+                [understanding_id],
+                allow_missing=False,
+                context=f"Named understanding '{normalized_name}'",
+            )
+        await _set_named_understanding(
+            conn,
+            workspace_id=workspace_id,
+            name=normalized_name,
+            understanding_id=understanding_id,
+        )
+        await record_event(
+            conn,
+            workspace_id=workspace_id,
+            session_id=effective_session_id,
+            operation="set_named_understanding",
+            detail={
+                "name": normalized_name,
+                "understanding_id": understanding_id,
+            },
+        )
+    return {
+        "name": normalized_name,
+        "understanding_id": understanding_id,
+    }
 
 
 async def reset_seen(
