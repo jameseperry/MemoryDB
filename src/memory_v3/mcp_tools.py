@@ -176,6 +176,18 @@ async def get_workspace_documents() -> dict:
     return await tools.get_workspace_documents()
 
 
+async def get_named_understandings(names: list[str] | None = None) -> dict:
+    """Return named understanding IDs for the current workspace.
+
+    Use this to resolve stable document-like names to active understanding IDs. If
+    `names` is omitted, all names in the current workspace are returned. If `names`
+    is provided, the result includes those exact names with `null` for any missing
+    mapping.
+    """
+    _log_tool_call("get_named_understandings")
+    return await tools.get_named_understandings(names=names)
+
+
 async def set_workspace_documents(
     soul_understanding_id: int | None = None,
     protocol_understanding_id: int | None = None,
@@ -193,6 +205,25 @@ async def set_workspace_documents(
         protocol_understanding_id=protocol_understanding_id,
         orientation_understanding_id=orientation_understanding_id,
         consolidation_understanding_id=consolidation_understanding_id,
+    )
+
+
+async def set_named_understanding(
+    name: str,
+    understanding_id: int | None = None,
+) -> dict:
+    """Assign or clear a stable name for an active understanding.
+
+    This generalizes the magic workspace documents. The special names `soul`,
+    `protocol`, `orientation`, and `consolidation` are also maintained here, and
+    `orient()` resolves them through this naming layer.
+
+    Passing `understanding_id=null` clears the name.
+    """
+    _log_tool_call("set_named_understanding")
+    return await tools.set_named_understanding(
+        name=name,
+        understanding_id=understanding_id,
     )
 
 

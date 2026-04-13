@@ -414,6 +414,37 @@ async def delete_workspace(name: str) -> dict:
     return {"name": name, "deleted": row is not None}
 
 
+async def _set_named_understanding_map(
+    conn,
+    *,
+    workspace_id: int,
+    name_to_understanding_id: dict[str, int | None],
+) -> None:
+    for name, understanding_id in name_to_understanding_id.items():
+        if understanding_id is None:
+            await conn.execute(
+                """
+                DELETE FROM named_understandings
+                WHERE workspace_id = $1
+                  AND name = $2
+                """,
+                workspace_id,
+                name,
+            )
+        else:
+            await conn.execute(
+                """
+                INSERT INTO named_understandings (workspace_id, name, understanding_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (workspace_id, name)
+                    DO UPDATE SET understanding_id = EXCLUDED.understanding_id
+                """,
+                workspace_id,
+                name,
+                understanding_id,
+            )
+
+
 async def set_workspace_document_ids(
     name: str,
     *,
@@ -476,6 +507,15 @@ async def set_workspace_document_ids(
         for index, (column, value) in enumerate(provided.items(), start=2):
             set_clauses.append(f"{column} = ${index}")
             args.append(value)
+
+        await _set_named_understanding_map(
+            conn,
+            workspace_id=workspace_id,
+            name_to_understanding_id={
+                column.removesuffix("_understanding_id"): value
+                for column, value in provided.items()
+            },
+        )
 
         row = await conn.fetchrow(
             f"""
@@ -577,6 +617,13 @@ async def reset_workspace(name: str) -> dict:
                     current_generation = 0,
                     last_consolidated_at = NULL
                 WHERE id = $1
+                """,
+                workspace_id,
+            )
+            await conn.execute(
+                """
+                DELETE FROM named_understandings
+                WHERE workspace_id = $1
                 """,
                 workspace_id,
             )
@@ -850,10 +897,23 @@ async def export_workspace(name: str, path: str | Path) -> dict:
                 workspace_id,
             )
         ]
+        named_understandings = [
+            serialize(row)
+            for row in await conn.fetch(
+                """
+                SELECT name, understanding_id
+                FROM named_understandings
+                WHERE workspace_id = $1
+                ORDER BY name
+                """,
+                workspace_id,
+            )
+        ]
 
     payload = {
         "schema_version": 3,
         "workspace": serialize(workspace_row),
+        "named_understandings": named_understandings,
         "subjects": subjects,
         "observations": observations,
         "understandings": understandings,
@@ -873,6 +933,7 @@ async def export_workspace(name: str, path: str | Path) -> dict:
     return {
         "name": name,
         "path": str(export_path.resolve()),
+        "named_understandings_exported": len(named_understandings),
         "subjects_exported": len(subjects),
         "observations_exported": len(observations),
         "understandings_exported": len(understandings),
@@ -1228,6 +1289,91 @@ async def import_workspace(
                 ),
             )
             _emit_import_progress(progress, "workspace_documents")
+
+            named_understandings = payload.get("named_understandings")
+            if named_understandings:
+                await conn.executemany(
+                    """
+                    INSERT INTO named_understandings (workspace_id, name, understanding_id)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (workspace_id, name)
+                        DO UPDATE SET understanding_id = EXCLUDED.understanding_id
+                    """,
+                    [
+                        (
+                            workspace_id,
+                            item["name"],
+                            understanding_id_map[item["understanding_id"]],
+                        )
+                        for item in named_understandings
+                    ],
+                )
+                _emit_import_progress(
+                    progress,
+                    "named_understandings",
+                    len(named_understandings),
+                )
+            else:
+                await _set_named_understanding_map(
+                    conn,
+                    workspace_id=workspace_id,
+                    name_to_understanding_id={
+                        "soul": (
+                            understanding_id_map[source_workspace["soul_understanding_id"]]
+                            if source_workspace.get("soul_understanding_id") is not None
+                            else None
+                        ),
+                        "protocol": (
+                            understanding_id_map[source_workspace["protocol_understanding_id"]]
+                            if source_workspace.get("protocol_understanding_id") is not None
+                            else None
+                        ),
+                        "orientation": (
+                            understanding_id_map[source_workspace["orientation_understanding_id"]]
+                            if source_workspace.get("orientation_understanding_id") is not None
+                            else None
+                        ),
+                        "consolidation": (
+                            understanding_id_map[source_workspace["consolidation_understanding_id"]]
+                            if source_workspace.get("consolidation_understanding_id") is not None
+                            else None
+                        ),
+                    },
+                )
+                _emit_import_progress(progress, "named_understandings")
+
+            await conn.execute(
+                """
+                UPDATE workspaces
+                SET
+                    soul_understanding_id = (
+                        SELECT understanding_id
+                        FROM named_understandings
+                        WHERE workspace_id = $1
+                          AND name = 'soul'
+                    ),
+                    protocol_understanding_id = (
+                        SELECT understanding_id
+                        FROM named_understandings
+                        WHERE workspace_id = $1
+                          AND name = 'protocol'
+                    ),
+                    orientation_understanding_id = (
+                        SELECT understanding_id
+                        FROM named_understandings
+                        WHERE workspace_id = $1
+                          AND name = 'orientation'
+                    ),
+                    consolidation_understanding_id = (
+                        SELECT understanding_id
+                        FROM named_understandings
+                        WHERE workspace_id = $1
+                          AND name = 'consolidation'
+                    )
+                WHERE id = $1
+                """,
+                workspace_id,
+            )
 
             if payload.get("utility_signals"):
                 utility_signal_rows = []
@@ -1848,6 +1994,15 @@ async def delete_understanding(workspace: str, understanding_id: int) -> dict:
     async with pool.acquire() as conn:
         workspace_id = await _get_workspace_id(conn, workspace)
         async with conn.transaction():
+            await conn.execute(
+                """
+                DELETE FROM named_understandings
+                WHERE workspace_id = $1
+                  AND understanding_id = $2
+                """,
+                workspace_id,
+                understanding_id,
+            )
             await conn.execute(
                 """
                 UPDATE workspaces
