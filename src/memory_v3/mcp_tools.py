@@ -320,6 +320,7 @@ async def finalize_consolidation(
     summary: str,
     updated_understanding_ids: list[int] | None = None,
     created_understanding_ids: list[int] | None = None,
+    reviewed_subject_names: list[str] | None = None,
 ) -> dict:
     """Finalize a consolidation pass and advance the workspace generation.
 
@@ -334,6 +335,7 @@ async def finalize_consolidation(
         summary,
         updated_understanding_ids=updated_understanding_ids,
         created_understanding_ids=created_understanding_ids,
+        reviewed_subject_names=reviewed_subject_names,
     )
 
 
