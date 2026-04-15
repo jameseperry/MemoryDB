@@ -737,6 +737,19 @@ async def _update_special_pointer(
             name="consolidation",
             understanding_id=understanding_id,
         )
+    else:
+        # Any other kind (e.g. "factual") with a subject gets the
+        # single_subject pointer so consolidation tracking works.
+        if subject_id is not None:
+            await conn.execute(
+                """
+                UPDATE subjects
+                SET single_subject_understanding_id = $2
+                WHERE id = $1
+                """,
+                subject_id,
+                understanding_id,
+            )
 
 
 async def _create_understanding_record(
@@ -810,7 +823,7 @@ async def _create_understanding_record(
 
     await _supersede_understanding_ids(conn, old_ids=previous_ids, new_id=understanding["id"])
 
-    if len(subject_ids) == 1 and kind in {"single_subject", "structural"}:
+    if len(subject_ids) == 1 and kind not in {"soul", "protocol", "orientation", "consolidation"}:
         await _update_special_pointer(
             conn,
             workspace_id=workspace_id,
@@ -2466,6 +2479,7 @@ async def finalize_consolidation(
     summary: str,
     updated_understanding_ids: list[int] | None = None,
     created_understanding_ids: list[int] | None = None,
+    reviewed_subject_names: list[str] | None = None,
     workspace: str | None = None,
     session_id: str | None = None,
     readonly: bool | None = None,
@@ -2507,12 +2521,27 @@ async def finalize_consolidation(
                 f"expected {expected_generation}, current {latest_generation}"
             )
 
+        if reviewed_subject_names:
+            normalized_names = _normalize_subject_names(reviewed_subject_names)
+            await conn.execute(
+                """
+                UPDATE subjects
+                SET last_reviewed_generation = $2
+                WHERE workspace_id = $1
+                  AND name = ANY($3)
+                """,
+                workspace_id,
+                expected_generation,
+                normalized_names,
+            )
+
         detail = {
             "summary": normalized_summary,
             "expected_generation": expected_generation,
             "new_generation": row["current_generation"],
             "updated_understanding_ids": sorted(updated_understanding_ids or []),
             "created_understanding_ids": sorted(created_understanding_ids or []),
+            "reviewed_subject_names": sorted(reviewed_subject_names or []),
         }
         await record_event(
             conn,
@@ -2528,6 +2557,7 @@ async def finalize_consolidation(
         "new_generation": row["current_generation"],
         "updated_understanding_ids": detail["updated_understanding_ids"],
         "created_understanding_ids": detail["created_understanding_ids"],
+        "reviewed_subject_names": detail["reviewed_subject_names"],
         "last_consolidated_at": row["last_consolidated_at"].isoformat(),
     }
 
@@ -3306,8 +3336,10 @@ async def get_consolidation_report(
             SELECT s.name, COUNT(os.observation_id) AS observation_count, $2::int AS generation
             FROM subjects s
             JOIN observation_subjects os ON os.subject_id = s.id
+            JOIN observations o ON o.id = os.observation_id
             WHERE s.workspace_id = $1
               AND s.single_subject_understanding_id IS NULL
+              AND o.generation > COALESCE(s.last_reviewed_generation, -1)
             GROUP BY s.id
             ORDER BY observation_count DESC, s.name
             """,
@@ -3318,18 +3350,16 @@ async def get_consolidation_report(
         stale_understandings = await conn.fetch(
             """
             SELECT u.id, u.summary, u.generation, u.created_at
-            FROM understandings u
-            JOIN understanding_subjects us ON us.understanding_id = u.id
-            JOIN subjects s ON s.id = us.subject_id
-            WHERE u.workspace_id = $1
-              AND u.kind = 'single_subject'
+            FROM subjects s
+            JOIN understandings u ON u.id = s.single_subject_understanding_id
+            WHERE s.workspace_id = $1
               AND u.superseded_by IS NULL
               AND EXISTS (
                   SELECT 1
                   FROM observations o
                   JOIN observation_subjects os ON os.observation_id = o.id
                   WHERE os.subject_id = s.id
-                    AND o.generation > u.generation
+                    AND o.generation > GREATEST(u.generation, COALESCE(s.last_reviewed_generation, -1))
               )
             ORDER BY u.created_at DESC
             """,
@@ -3572,6 +3602,16 @@ async def get_pending_consolidation(
                 "subject_names": [item["subject_a"], item["subject_b"]],
                 "generation": item["generation"],
                 "priority": item["intersection_size"],
+            }
+        )
+    for item in report["stale_understandings"]:
+        pending.append(
+            {
+                "item_type": "stale_understanding",
+                "subject_names": item["subject_names"],
+                "understanding_id": item["id"],
+                "generation": item["generation"],
+                "priority": 1,
             }
         )
     return sorted(pending, key=lambda item: item["priority"], reverse=True)
