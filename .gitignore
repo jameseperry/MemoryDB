@@ -18,6 +18,13 @@ build/
 # OS
 .DS_Store
 
+# Docker — corporate CA certs (keep .gitkeep, ignore actual certs)
+docker/certs/*.crt
+docker/certs/*.pem
+
+# Docker — pre-downloaded embedding model
+docker/models/
+
 # AI
 .codex
 .claude/

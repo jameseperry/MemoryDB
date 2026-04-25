@@ -5,8 +5,6 @@ services:
       POSTGRES_USER: memory
       POSTGRES_PASSWORD: memory
       POSTGRES_DB: memory
-    ports:
-      - "19432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/initdb:/docker-entrypoint-initdb.d
@@ -15,6 +13,18 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  memory:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASYNC_DATABASE_URL_V3: postgresql://memory:memory@postgres:5432/memory_v3
+      DATABASE_URL_V3: postgresql+psycopg2://memory:memory@postgres:5432/memory_v3
+      MCP_PORT: "8765"
+    ports:
+      - "${MCP_HOST_PORT:-8765}:8765"
 
 volumes:
   postgres_data:

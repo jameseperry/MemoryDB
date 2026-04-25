@@ -7,44 +7,51 @@ It provides:
 - dual MCP transports for Streamable HTTP and SSE clients
 - an admin CLI for workspace and database management
 
-## Requirements
-
-- Python 3.12+
-- Docker Compose
-
-## Setup
+## Quick Start (Docker)
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e .
+# 1. Download the embedding model (~500MB, one-time)
+HF_TOKEN=hf_... python docker/download_model.py
+
+# 2. Build and run
+docker compose build
+docker compose up -d
+
+# 3. Create a workspace
+docker compose exec memory memory-admin workspace create <name>
 ```
 
-## Run
+The server listens on port `8765` and serves the v3 API at `/v3/mcp` and `/v3/sse`.
 
-Start Postgres, run migrations, and launch the MCP server:
+If you're behind a corporate proxy, drop your CA certificate into `docker/certs/`
+before building.
+
+## Local Development
+
+Requirements: Python 3.10+, Docker Compose (for Postgres).
 
 ```bash
+# Set up the virtualenv
+./scripts/setup.sh
+
+# Start Postgres, run migrations, and launch the server
 ./scripts/start.sh
 ```
 
-The server listens on port `8765` by default.
-The server serves the v3 API at `/v3/mcp` and `/v3/sse`.
-
-The Docker Compose setup creates `memory_v3` on first initialization. On an
-already-initialized Postgres volume, `scripts/start.sh` also checks for
-`memory_v3` and creates it before running migrations.
-
 ## Admin CLI
-
-Examples:
 
 ```bash
 memory-admin workspace list
-memory-admin workspace create james/gpt
-memory-admin workspace remove james/gpt
-memory-admin workspace set-documents james/gpt --soul 101 --protocol 102 --orientation 103
+memory-admin workspace create alice/claude
+memory-admin workspace remove alice/claude
+memory-admin workspace set-documents alice/claude --soul 101 --protocol 102
 memory-admin database backup backup.sql
 memory-admin database restore backup.sql --yes
+```
+
+Inside Docker:
+```bash
+docker compose exec memory memory-admin workspace list
 ```
 
 ## Onboarding a model
