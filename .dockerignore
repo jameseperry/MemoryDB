@@ -1,0 +1,10 @@
+.venv/
+.git/
+*.dump
+*.sql
+backup_*
+__pycache__/
+*.pyc
+.env
+.claude/
+tests/

@@ -6,6 +6,39 @@ correctly without reading the full API reference.
 
 ---
 
+## Quick Start (Docker)
+
+The fastest way to run MemoryDB is with Docker Compose. Two steps: download the
+embedding model, then build and run.
+
+```bash
+# 1. Download the embedding model (~500MB, one-time)
+#    Set HF_TOKEN for faster downloads (HuggingFace throttles anonymous requests)
+HF_TOKEN=hf_... python docker/download_model.py
+
+# 2. (Optional) If behind a corporate proxy, drop your CA cert into docker/certs/
+cp /path/to/corporate-ca.crt docker/certs/
+
+# 3. Build and start
+docker compose build
+docker compose up -d
+
+# 4. Create a workspace for your model
+docker compose exec memory memory-admin workspace create <name>
+```
+
+The server will be available at `http://localhost:8765`. Point your Claude Code MCP
+config at `http://localhost:8765/v3/mcp` with the `X-Memory-Workspace` header set to
+your workspace name.
+
+To stop:
+```bash
+docker compose down        # stop services (data persists)
+docker compose down -v     # stop and delete all data
+```
+
+---
+
 ## What this system is
 
 MemoryDB is a persistent memory database for AI models. It stores information across
