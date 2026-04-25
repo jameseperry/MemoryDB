@@ -97,7 +97,7 @@ async def orient(
 
 
 async def bring_to_mind(
-    topic_or_context: str,
+    topic_or_context: str | list[str],
     last_token: int | None = None,
     include_seen: bool = False,
 ) -> dict:
@@ -115,6 +115,12 @@ async def bring_to_mind(
     - broad but anchored
     - describe the current topic, decision, or context
     - do not phrase it as a narrow factual question unless that is truly what you need
+
+    `topic_or_context` can be a single string or a list of strings. When a list is
+    provided, a separate search is run for each topic and the results are merged,
+    keeping the highest relevance score for each item. This casts a wider net than
+    a single query and is useful when the current context touches several distinct
+    areas.
 
     The server maintains a per-session seen-set so repeated calls do not keep returning
     the same items. `last_token` is the continuity token returned by the previous call;

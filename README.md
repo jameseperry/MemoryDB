@@ -34,7 +34,10 @@ Requirements: Python 3.10+, Docker Compose (for Postgres).
 # Set up the virtualenv
 ./scripts/setup.sh
 
-# Start Postgres, run migrations, and launch the server
+# Start Postgres (dev mode — exposes port 19432 to host)
+docker compose -f docker-compose.dev.yml up -d
+
+# Run migrations and launch the server
 ./scripts/start.sh
 ```
 

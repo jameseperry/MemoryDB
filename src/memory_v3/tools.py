@@ -2806,7 +2806,7 @@ async def reset_seen(
 
 
 async def bring_to_mind(
-    topic_or_context: str,
+    topic_or_context: str | list[str],
     last_token: int | None = None,
     include_seen: bool = False,
     workspace: str | None = None,
@@ -2879,14 +2879,29 @@ async def bring_to_mind(
             )
             seen_ids = {row["id"] for row in rows}
 
-    search_results = await search(
-        topic_or_context,
-        limit=settings.bring_to_mind_search_limit,
-        workspace=workspace_name,
-    )
+    # Support single string or list of topics.
+    topics = [topic_or_context] if isinstance(topic_or_context, str) else topic_or_context
+
+    # Run a search per topic and merge results, keeping highest score per item.
+    merged: dict[int, dict] = {}
+    for topic in topics:
+        search_results = await search(
+            topic,
+            limit=settings.bring_to_mind_search_limit,
+            workspace=workspace_name,
+        )
+        for item in search_results:
+            item_id = item["id"]
+            if item_id not in merged or item["score"] > merged[item_id]["score"]:
+                merged[item_id] = item
+
+    all_results = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
     filtered_results = [
-        item for item in search_results if include_seen or item["id"] not in seen_ids
+        item for item in all_results if include_seen or item["id"] not in seen_ids
     ][: settings.bring_to_mind_result_limit]
+
+    # For event logging, summarize the topics.
+    topic_summary = topics[0][:160] if len(topics) == 1 else str(topics)[:160]
 
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace_name)
@@ -2907,7 +2922,7 @@ async def bring_to_mind(
             session_id=effective_session_id,
             operation="bring_to_mind",
             detail={
-                "topic": topic_or_context[:160],
+                "topic": topic_summary,
                 "compaction_detected": compaction_detected,
                 "result_count": len(filtered_results),
                 "include_seen": include_seen,
