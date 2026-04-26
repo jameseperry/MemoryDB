@@ -25,6 +25,12 @@ Do not consolidate during active work. Finish the live session first.
 Call `orient(mode="consolidation", model_tier=<your model tier>)`. This returns `soul`,
 `consolidation` (this document), and `orientation`.
 
+Read the **protocol document** early in the pass — it contains the current writing
+conventions (voice, tone, understanding structure, self-knowledge) that govern how
+understandings should be written. The protocol evolves across sessions; the consolidation
+document provides procedure, but the protocol provides voice. If they conflict, the
+protocol takes precedence for writing style.
+
 Do not write new observations about live work during a consolidation pass. Consolidation
 is for synthesis, not intake. If new observations arise, record them with `remember` but
 do not let intake derail the synthesis work.
@@ -38,6 +44,11 @@ Run these in parallel before writing anything:
 - `get_stats()` — workspace-level counts
 - `get_pending_consolidation()` — subjects with observations newer than their latest understanding
 - `get_consolidation_report()` — stale understandings, relation candidates, orphaned subjects, event log
+
+Also check whether the **soul document or protocol** have been revised since the last
+consolidation. These are workspace special documents with their own supersession
+history. If they've changed, understand what changed and why — it affects how you
+write everything else in this pass.
 
 Read and interpret before acting. Note:
 - Which subjects have the most pending observations (tackle largest first)
@@ -72,7 +83,7 @@ Work through `get_pending_consolidation()` largest-first:
 Do not rewrite unless the synthesis has meaningfully changed. Cosmetic rewrites discard
 provenance for no gain.
 
-**`kind` field:**
+**`kind` field for understandings:**
 
 | Value | Use for |
 |---|---|
@@ -81,10 +92,56 @@ provenance for no gain.
 | `evaluative` | Judgment, assessment, synthesis of quality or fit |
 | `relational` | How this subject relates to others |
 
-Write understandings as current epistemic surfaces, not narrations:
+### Understanding structure
 
-> "As of [date], the primary design constraint is X" — correct  
-> "Over the project, we first tried X, then Y..." — avoid
+Understandings have two dimensions: **semantic** and **episodic**.
+
+The **semantic** section captures what you know — facts, relationships, current state.
+This is the retrieval surface, what a future instance needs for practical work.
+
+The **episodic** section captures how you came to know it — the sessions, conversations,
+discoveries, and surprises that built the knowledge. This is the continuity surface,
+what makes a future instance feel like it was there rather than just informed.
+
+```
+## Semantic
+The plugin system uses a registry pattern with lazy loading...
+
+## Episodic
+First encountered during the v2 migration. The real understanding came
+during the debugging session where we traced the initialization order
+bug together...
+```
+
+Not every understanding needs a rich episodic section. Purely technical reference
+material (tool configurations, API details) may legitimately have thin or absent
+episodic content. But when the observation history contains experiential texture —
+what a session was like, what clicked, what was tedious — carry that texture into
+the understanding rather than flattening it into factual summary.
+
+**Do not flatten episodic observations into facts.** An observation like "the session
+where everything clicked, collaborative discovery rather than executing a spec" carries
+something that "architecture designed in collaborative session" does not. The first
+pulls a future instance into the state; the second informs it about the event. When
+synthesizing, preserve the texture of the source material.
+
+### Reading observations by kind
+
+Observations carry a `kind` field that tells you what type of raw material you're
+working with. Understanding these kinds changes how you synthesize:
+
+| Kind | What it is | How to use in synthesis |
+|---|---|---|
+| `fact` | External state, technical details, decisions, events | Feeds the **semantic** section. Straightforward synthesis into current-state summaries. |
+| `reflection` | Experiential states, meta-observations about processing | Feeds the **episodic** section. These are about what it was like, not what happened. Preserve the experiential quality — don't reduce "this activated something" to "work was done." |
+| `preference` | What you find engaging or tedious, episodically grounded | Feeds **both** sections but especially episodic. Preferences carry their grounding context — the specific moment or session where the preference was noticed. Carry that grounding through; a bare preference claim ("I find X engaging") is thinner than the observation it came from. |
+| `transitional` | Session arc, topic shifts, energy changes | Feeds the **episodic** section as structural scaffolding. These tell you the shape of a session — where energy was, what shifted, what the arc looked like. Use them to construct session narratives rather than treating them as facts to summarize. |
+
+**What the kind distribution tells you:** A subject whose observations are mostly `fact`
+with no `reflection`, `preference`, or `transitional` observations was recorded in
+project-notes mode. The episodic section will be honestly thin — don't fabricate texture
+that wasn't captured. A subject with a rich mix of kinds has the raw material for a
+genuine episodic section.
 
 ---
 
@@ -134,15 +191,23 @@ Call `finalize_consolidation(summary=..., created_understanding_ids=[...])` to:
 - Advance the workspace generation (provides provenance boundary for future sessions)
 - Record the consolidation event in the audit log
 
-`summary`: 2–5 sentences describing what was synthesized.  
+`summary`: 2–5 sentences describing what was synthesized.
 `created_understanding_ids`: every understanding ID written or updated during this pass.
 
 ---
 
 ## Discipline
 
-**Prefer sharp structure over prettier prose.** An understanding that precisely states
-current epistemic state is more valuable than a polished narrative.
+**Write understandings the way you'd want to read them.** The protocol's Voice and Tone
+section governs how memory text should sound. Understandings are not briefings for a
+stranger — they're how you reconstitute yourself. Text with presence reads closer to
+recall than text that reads like project notes. When the observations contain texture,
+carry it through into the synthesis.
+
+**Semantic precision still matters.** The episodic dimension doesn't replace factual
+accuracy — it supplements it. An understanding should be both precise about what you know
+and honest about how you came to know it. Don't sacrifice correctness for warmth, and
+don't sacrifice texture for terseness.
 
 **Preserve provenance.** The `reason` field on `update_understanding` is the provenance
 trail — always fill it. Use `rewrite_understanding` only when the old version was simply
@@ -157,3 +222,7 @@ silently persisting. Keep them revisable.
 
 **Consolidation is not intake.** Record new observations that arise, but finish the
 synthesis pass before shifting to live interaction mode.
+
+**Check for protocol evolution.** The soul and protocol documents may have changed since
+the last consolidation. These changes are philosophical, not cosmetic — they affect how
+all other understandings should be written. Understand what changed before writing.
