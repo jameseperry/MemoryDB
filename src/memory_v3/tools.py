@@ -3151,7 +3151,7 @@ async def bring_to_mind(
 
     # Classify results into subjects, sessions, and direct hits
     subjects_seen: dict[str, dict] = {}
-    session_hits: list[dict] = []
+    session_understanding_ids: list[tuple[int, float]] = []  # (understanding_id, score)
     direct_hits: list[dict] = []
 
     for item in filtered_results:
@@ -3165,11 +3165,7 @@ async def bring_to_mind(
 
         # Classify by type
         if item["kind"] == "understanding" and item.get("understanding_kind") == "session":
-            session_hits.append({
-                "id": item["id"],
-                "summary": item["summary"],
-                "relevance_score": item["score"],
-            })
+            session_understanding_ids.append((item["id"], item["score"]))
         else:
             direct_hits.append({
                 "id": item["id"],
@@ -3181,10 +3177,12 @@ async def bring_to_mind(
                 "generation": item["generation"],
             })
 
-    # Enrich subjects with summaries from the database
-    if subjects_seen:
-        async with pool.acquire() as conn:
-            workspace_id = await resolve_workspace_id(conn, workspace_name)
+    # Enrich subjects and sessions from the database
+    session_hits: list[dict] = []
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace_name)
+
+        if subjects_seen:
             subject_rows = await conn.fetch(
                 """
                 SELECT name, summary
@@ -3198,6 +3196,30 @@ async def bring_to_mind(
             for row in subject_rows:
                 if row["name"] in subjects_seen:
                     subjects_seen[row["name"]]["summary"] = row["summary"]
+
+        if session_understanding_ids:
+            understanding_ids = [uid for uid, _ in session_understanding_ids]
+            score_by_uid = {uid: score for uid, score in session_understanding_ids}
+            session_rows = await conn.fetch(
+                """
+                SELECT s.session_id, s.started_at, s.updated_at AS latest_activity,
+                       u.summary, s.session_understanding_id
+                FROM sessions s
+                JOIN understanding_records u ON u.id = s.session_understanding_id
+                WHERE s.workspace_id = $1
+                  AND s.session_understanding_id = ANY($2)
+                """,
+                workspace_id,
+                understanding_ids,
+            )
+            for row in session_rows:
+                session_hits.append({
+                    "session_id": row["session_id"],
+                    "started_at": _format_timestamp_with_dow(row["started_at"]),
+                    "latest_activity": _format_timestamp_with_dow(row["latest_activity"]),
+                    "summary": row["summary"],
+                    "relevance_score": score_by_uid.get(row["session_understanding_id"], 0.0),
+                })
 
     return {
         "compaction_note": (
