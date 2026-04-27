@@ -202,8 +202,8 @@ async def resolve_session_id(
     """Resolve a transport session token to the workspace-local session row ID."""
     row = await conn.fetchrow(
         """
-        INSERT INTO sessions (workspace_id, session_token, updated_at)
-        VALUES ($1, $2, NOW())
+        INSERT INTO sessions (workspace_id, session_token, started_at, updated_at)
+        VALUES ($1, $2, NOW(), NOW())
         ON CONFLICT (workspace_id, session_token)
             DO UPDATE SET updated_at = NOW()
         RETURNING session_id

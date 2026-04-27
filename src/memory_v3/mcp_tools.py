@@ -47,6 +47,17 @@ def _log_tool_call(tool_name: str) -> None:
     )
 
 
+async def _inject_workspace_activity(result: dict) -> dict:
+    """Add workspace_activity to a tool response."""
+    try:
+        activity = await tools.get_workspace_activity()
+        if activity:
+            result["workspace_activity"] = activity
+    except Exception:
+        pass  # Don't fail the tool call if activity query fails
+    return result
+
+
 async def get_status() -> dict:
     """Return v3 server status."""
     _log_tool_call("get_status")
@@ -93,7 +104,8 @@ async def orient(
         mode: `interaction` for normal live work, `consolidation` for maintenance passes.
     """
     _log_tool_call("orient")
-    return await tools.orient(model_tier=model_tier, mode=mode)
+    result = await tools.orient(model_tier=model_tier, mode=mode)
+    return await _inject_workspace_activity(result)
 
 
 async def bring_to_mind(
@@ -134,14 +146,18 @@ async def bring_to_mind(
     - `usage_hint`: reminder that surfaced items are candidates, not truth
     """
     _log_tool_call("bring_to_mind")
-    return await tools.bring_to_mind(
+    result = await tools.bring_to_mind(
         topic_or_context,
         last_token=last_token,
         include_seen=include_seen,
     )
+    return await _inject_workspace_activity(result)
 
 
-async def recall(question_or_subject_name: str) -> dict:
+async def recall(
+    question_or_subject_name: str,
+    search: str | None = None,
+) -> dict:
     """Do directed retrieval for either a subject name or a natural-language question.
 
     If the input exactly matches a subject in the current workspace, this returns a
@@ -150,6 +166,7 @@ async def recall(question_or_subject_name: str) -> dict:
     - active single-subject understanding, if any
     - structural understanding, if any
     - recent observations for that subject
+    - sessions that discussed this subject (with session understanding content)
 
     Otherwise it treats the input as a question and returns a best-answer view built
     from search:
@@ -161,7 +178,8 @@ async def recall(question_or_subject_name: str) -> dict:
     problem is that you may not know what prior context exists.
     """
     _log_tool_call("recall")
-    return await tools.recall(question_or_subject_name)
+    result = await tools.recall(question_or_subject_name, search=search)
+    return await _inject_workspace_activity(result)
 
 
 async def reset_seen() -> dict:
@@ -270,7 +288,7 @@ async def remember(
     subjects.
     """
     _log_tool_call("remember")
-    return await tools.remember(
+    result = await tools.remember(
         subject_names,
         content,
         kind=kind,
@@ -278,6 +296,7 @@ async def remember(
         related_to=related_to,
         points_to=points_to,
     )
+    return await _inject_workspace_activity(result)
 
 
 async def update_understanding(
@@ -368,18 +387,6 @@ async def delete_understanding(understanding_id: int) -> dict:
     """Delete an understanding written in the current session and generation."""
     _log_tool_call("delete_understanding")
     return await tools.delete_understanding(understanding_id)
-
-
-async def mark_useful(id: int) -> dict:
-    """Attach a `useful` signal to an active observation or understanding."""
-    _log_tool_call("mark_useful")
-    return await tools.mark_useful(id)
-
-
-async def mark_questionable(id: int, reason: str | None = None) -> dict:
-    """Attach a `questionable` signal to an active observation or understanding."""
-    _log_tool_call("mark_questionable")
-    return await tools.mark_questionable(id, reason=reason)
 
 
 async def create_subjects(subjects: list[dict]) -> list[dict]:
@@ -502,18 +509,6 @@ async def open_around(subject_name: str) -> dict:
     return await tools.open_around(subject_name)
 
 
-async def get_consolidation_report() -> dict:
-    """Return detailed signals about consolidation opportunities and staleness."""
-    _log_tool_call("get_consolidation_report")
-    return await tools.get_consolidation_report()
-
-
-async def get_pending_consolidation() -> list[dict]:
-    """Return a flattened queue-like view of pending consolidation work."""
-    _log_tool_call("get_pending_consolidation")
-    return await tools.get_pending_consolidation()
-
-
 async def find_similar_subjects(
     limit: int = 20,
     min_score: float = 0.75,
@@ -533,3 +528,112 @@ async def get_stats() -> dict:
     """Return workspace-level counts and embedding coverage statistics."""
     _log_tool_call("get_stats")
     return await tools.get_stats()
+
+
+# ---------------------------------------------------------------------------
+# Session entity tools
+# ---------------------------------------------------------------------------
+
+
+async def describe_session(
+    content: str | None = None,
+    summary: str | None = None,
+    session_id: int | None = None,
+) -> dict:
+    """Set or update the current session's understanding.
+
+    Creates a session understanding on first call, rewrites it in place on
+    subsequent calls. Can set `content` (narrative depth), `summary` (short
+    navigational label), or both.
+
+    Usage:
+    - Call after the first exchange that makes the session's focus clear
+    - Update when a transitional observation is written (topic shift)
+    - At natural conclusion points, enrich with a fuller narrative
+
+    The optional `session_id` parameter targets a different session's
+    understanding and is only allowed in consolidation mode (after
+    `orient(mode="consolidation")` has been called).
+    """
+    _log_tool_call("describe_session")
+    result = await tools.describe_session(
+        content=content,
+        summary=summary,
+        target_session_id=session_id,
+    )
+    return await _inject_workspace_activity(result)
+
+
+async def what_happened(
+    session_id: int,
+) -> dict:
+    """Retrieve the full episodic record of a session.
+
+    Returns the session's understanding (summary + narrative content) and all
+    observations in creation order with `kind` visible. The sequence of kinds
+    (fact, fact, reflection, transitional, preference, fact) tells the story
+    of where the conversation shifted.
+
+    Use this to drill into a specific session after discovering it via
+    `bring_to_mind` or `recall`.
+    """
+    _log_tool_call("what_happened")
+    return await tools.what_happened(target_session_id=session_id)
+
+
+async def sessions(
+    limit: int = 10,
+    active_within_hours: float | None = 24,
+    after: str | None = None,
+    before: str | None = None,
+) -> list[dict]:
+    """List recent and/or active sessions with metadata.
+
+    Returns sessions ordered by latest activity, with summary from the session
+    understanding (or last transitional observation as fallback), observation
+    count, and model tier. Timestamps include day of week.
+
+    When `after`/`before` are provided (ISO date or datetime), they filter by
+    `started_at` and override `active_within_hours`. This supports queries like
+    "what happened last week?"
+    """
+    _log_tool_call("sessions")
+    return await tools.list_sessions(
+        limit=limit,
+        active_within_hours=active_within_hours,
+        after=after,
+        before=before,
+    )
+
+
+async def review_sessions() -> dict:
+    """Return sessions needing understandings for consolidation.
+
+    Lists sessions that have observations but no session understanding, or
+    where the session has activity newer than its understanding. Sessions are
+    ordered chronologically by `started_at` for processing in time order.
+    """
+    _log_tool_call("review_sessions")
+    return await tools.review_sessions()
+
+
+async def review_subjects() -> dict:
+    """Return orphaned subjects and stale understandings for consolidation.
+
+    Orphaned subjects have observations but no understanding. Stale understandings
+    have observations newer than the understanding's generation. Use this after
+    the session walk to identify subject-level work.
+    """
+    _log_tool_call("review_subjects")
+    return await tools.review_subjects()
+
+
+async def review_intersections() -> dict:
+    """Return intersection candidates for consolidation.
+
+    Returns subject pairs that have co-tagged observations in the current
+    generation (needing synthesis) and semantically dense pairs without
+    relationship understandings.
+    """
+    _log_tool_call("review_intersections")
+    return await tools.review_intersections()

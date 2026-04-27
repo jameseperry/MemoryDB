@@ -187,7 +187,8 @@ async def search_embeddings(
                     o.created_at,
                     s.session_token AS session_id,
                     o.model_tier,
-                    NULL::text AS summary
+                    NULL::text AS summary,
+                    NULL::text AS understanding_kind
                 FROM observations o
                 LEFT JOIN sessions s ON s.session_id = o.session_id
                 WHERE o.workspace_id = $1
@@ -202,7 +203,8 @@ async def search_embeddings(
                     u.created_at,
                     s.session_token AS session_id,
                     u.model_tier,
-                    u.summary
+                    u.summary,
+                    u.kind AS understanding_kind
                 FROM understandings u
                 LEFT JOIN sessions s ON s.session_id = u.session_id
                 WHERE u.workspace_id = $1
@@ -217,6 +219,7 @@ async def search_embeddings(
                 a.created_at,
                 a.session_id,
                 a.model_tier,
+                a.understanding_kind,
                 1 - (e.vector <=> $3::vector) AS score
             FROM embeddings e
             JOIN active_targets a ON a.target_id = e.target_id
@@ -248,6 +251,7 @@ async def search_embeddings(
                     "created_at": row["created_at"],
                     "session_id": row["session_id"],
                     "model_tier": row["model_tier"],
+                    "understanding_kind": row["understanding_kind"],
                 }
 
     return sorted(candidates.values(), key=lambda item: item["score"], reverse=True)[:limit]

@@ -55,8 +55,6 @@ def create_mcp_server() -> FastMCP:
     mcp.add_tool(mcp_tools.finalize_consolidation)
     mcp.add_tool(mcp_tools.rewrite_understanding)
     mcp.add_tool(mcp_tools.delete_understanding)
-    mcp.add_tool(mcp_tools.mark_useful)
-    mcp.add_tool(mcp_tools.mark_questionable)
     mcp.add_tool(mcp_tools.create_subjects)
     mcp.add_tool(mcp_tools.get_subjects)
     mcp.add_tool(mcp_tools.set_subject_summary)
@@ -72,10 +70,17 @@ def create_mcp_server() -> FastMCP:
     mcp.add_tool(mcp_tools.search)
     mcp.add_tool(mcp_tools.open_intersection)
     mcp.add_tool(mcp_tools.open_around)
-    mcp.add_tool(mcp_tools.get_consolidation_report)
-    mcp.add_tool(mcp_tools.get_pending_consolidation)
     mcp.add_tool(mcp_tools.find_similar_subjects)
     mcp.add_tool(mcp_tools.merge_subjects)
     mcp.add_tool(mcp_tools.get_stats)
     mcp.add_tool(mcp_tools.get_status)
+
+    # Session entity tools
+    mcp.add_tool(mcp_tools.describe_session)
+    mcp.add_tool(mcp_tools.what_happened)
+    mcp.add_tool(mcp_tools.sessions)
+    mcp.add_tool(mcp_tools.review_sessions)
+    mcp.add_tool(mcp_tools.review_subjects)
+    mcp.add_tool(mcp_tools.review_intersections)
+
     return mcp

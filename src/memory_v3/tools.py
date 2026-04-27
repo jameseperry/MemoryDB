@@ -31,7 +31,9 @@ SPECIAL_UNDERSTANDING_NAME_TO_COLUMN = {
 }
 
 
-def _normalize_subject_names(subject_names: list[str]) -> list[str]:
+def _normalize_subject_names(
+    subject_names: list[str], *, allow_empty: bool = False
+) -> list[str]:
     """Normalize, validate, and deduplicate subject names while preserving order."""
     normalized: list[str] = []
     seen: set[str] = set()
@@ -42,7 +44,7 @@ def _normalize_subject_names(subject_names: list[str]) -> list[str]:
         if clean not in seen:
             seen.add(clean)
             normalized.append(clean)
-    if not normalized:
+    if not normalized and not allow_empty:
         raise ValueError("At least one subject name is required")
     return normalized
 
@@ -772,12 +774,17 @@ async def _create_understanding_record(
         session_token=session_id,
     )
     subject_ids = [row["id"] for row in subject_rows]
-    previous_ids = await _find_active_understanding_exact_subjects(
-        conn,
-        workspace_id=workspace_id,
-        kind=kind,
-        subject_ids=subject_ids,
-    )
+
+    # Session understandings have no subjects — skip supersession and pointer logic
+    if subject_ids:
+        previous_ids = await _find_active_understanding_exact_subjects(
+            conn,
+            workspace_id=workspace_id,
+            kind=kind,
+            subject_ids=subject_ids,
+        )
+    else:
+        previous_ids = []
 
     row = await conn.fetchrow(
         """
@@ -799,14 +806,15 @@ async def _create_understanding_record(
     )
     understanding = dict(row)
 
-    await conn.executemany(
-        """
-        INSERT INTO understanding_subjects (understanding_id, subject_id)
-        VALUES ($1, $2)
-        ON CONFLICT DO NOTHING
-        """,
-        [(understanding["id"], subject_id) for subject_id in subject_ids],
-    )
+    if subject_ids:
+        await conn.executemany(
+            """
+            INSERT INTO understanding_subjects (understanding_id, subject_id)
+            VALUES ($1, $2)
+            ON CONFLICT DO NOTHING
+            """,
+            [(understanding["id"], subject_id) for subject_id in subject_ids],
+        )
 
     if source_observation_ids:
         await conn.executemany(
@@ -821,7 +829,8 @@ async def _create_understanding_record(
             ],
         )
 
-    await _supersede_understanding_ids(conn, old_ids=previous_ids, new_id=understanding["id"])
+    if previous_ids:
+        await _supersede_understanding_ids(conn, old_ids=previous_ids, new_id=understanding["id"])
 
     if len(subject_ids) == 1 and kind not in {"soul", "protocol", "orientation", "consolidation"}:
         await _update_special_pointer(
@@ -1483,7 +1492,12 @@ async def create_understanding(
             workspace_id,
             effective_session_id,
         )
-        subject_rows = await _require_subjects(conn, workspace_id, subject_names)
+        if subject_names:
+            subject_rows = await _require_subjects(conn, workspace_id, subject_names)
+        else:
+            if kind != "session":
+                raise ValueError("subject_names can only be empty for kind='session'")
+            subject_rows = []
         if source_observation_ids:
             rows = await conn.fetch(
                 """
@@ -2061,6 +2075,7 @@ async def search(
             "session_id": item.get("session_id"),
             "model_tier": item.get("model_tier"),
             "score": float(item["score"]),
+            "understanding_kind": item.get("understanding_kind"),
             "points_to": (
                 observation_links_by_id.get(item["id"], {}).get("points_to", [])
                 if item["kind"] == "observation"
@@ -2078,6 +2093,7 @@ async def search(
 
 async def recall(
     question_or_subject_name: str,
+    search: str | None = None,
     workspace: str | None = None,
 ) -> dict:
     """Directed retrieval for a subject name or natural-language question."""
@@ -2119,21 +2135,80 @@ async def recall(
                 structural_understanding = structural_rows[
                     subject_row["structural_understanding_id"]
                 ]
-            recent_observations = await conn.fetch(
-                """
-                SELECT o.id, o.content, o.kind, o.created_at
-                FROM observations o
-                JOIN observation_subjects os ON os.observation_id = o.id
-                WHERE os.subject_id = $1
-                ORDER BY o.created_at DESC
-                LIMIT 5
-                """,
-                subject_row["id"],
-            )
+            if search is not None:
+                # Scoped semantic search within this subject's observations
+                from memory_v3.embeddings import embed_query, get_perspectives
+                perspectives = await get_perspectives(conn, workspace_id)
+                if perspectives:
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    query_vector = await loop.run_in_executor(
+                        None, embed_query, search, perspectives[0]["instruction"]
+                    )
+                    recent_observations = await conn.fetch(
+                        """
+                        SELECT o.id, o.content, o.kind, o.created_at,
+                               1 - (e.vector <=> $3::vector) AS score
+                        FROM observations o
+                        JOIN observation_subjects os ON os.observation_id = o.id
+                        JOIN embeddings e ON e.target_id = o.id
+                            AND e.workspace_id = o.workspace_id
+                            AND e.perspective_id = $4
+                        WHERE os.subject_id = $1
+                          AND o.workspace_id = $2
+                        ORDER BY e.vector <=> $3::vector
+                        LIMIT 5
+                        """,
+                        subject_row["id"],
+                        workspace_id,
+                        str(query_vector),
+                        perspectives[0]["id"],
+                    )
+                else:
+                    recent_observations = []
+            else:
+                recent_observations = await conn.fetch(
+                    """
+                    SELECT o.id, o.content, o.kind, o.created_at
+                    FROM observations o
+                    JOIN observation_subjects os ON os.observation_id = o.id
+                    WHERE os.subject_id = $1
+                    ORDER BY o.created_at DESC
+                    LIMIT 5
+                    """,
+                    subject_row["id"],
+                )
             observation_links_by_id = await _get_observation_links(
                 conn,
                 [row["id"] for row in recent_observations],
             )
+
+            # Get sessions that discussed this subject
+            session_understanding_rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (s.session_id)
+                    s.session_id, s.started_at, s.updated_at AS latest_activity,
+                    u.summary, ur.content AS understanding_content
+                FROM records r
+                JOIN observation_subjects os ON os.observation_id = r.id
+                JOIN sessions s ON s.session_id = r.session_id
+                LEFT JOIN understanding_records u ON u.id = s.session_understanding_id
+                LEFT JOIN records ur ON ur.id = s.session_understanding_id
+                WHERE os.subject_id = $1
+                  AND r.workspace_id = $2
+                  AND r.record_type = 'observation'
+                ORDER BY s.session_id, s.updated_at DESC
+                """,
+                subject_row["id"],
+                workspace_id,
+            )
+            # Sort by latest activity
+            session_understanding_rows = sorted(
+                session_understanding_rows,
+                key=lambda r: r["latest_activity"],
+                reverse=True,
+            )[:5]
+
             target_ids = [row["id"] for row in recent_observations]
             if single_understanding is not None:
                 target_ids.append(single_understanding["id"])
@@ -2188,6 +2263,16 @@ async def recall(
                         "pointed_to_by": observation_links_by_id.get(row["id"], {}).get("pointed_to_by", []),
                     }
                     for row in recent_observations
+                ],
+                "sessions": [
+                    {
+                        "session_id": row["session_id"],
+                        "started_at": _format_timestamp_with_dow(row["started_at"]),
+                        "latest_activity": _format_timestamp_with_dow(row["latest_activity"]),
+                        "summary": row["summary"],
+                        "content": row["understanding_content"],
+                    }
+                    for row in session_understanding_rows
                 ],
             }
 
@@ -2406,12 +2491,81 @@ async def orient(
                     "session_id": event_row["session_token"],
                 }
 
+        # --- Session context ---
+        from datetime import datetime, timezone
+
+        current_time = datetime.now(timezone.utc)
+
+        # This session info
+        this_session_row = await conn.fetchrow(
+            """
+            SELECT s.session_id, s.started_at,
+                   (SELECT COUNT(*) FROM records r
+                    WHERE r.session_id = s.session_id
+                      AND r.record_type = 'observation') AS observation_count
+            FROM sessions s
+            WHERE s.workspace_id = $1 AND s.session_token = $2
+            """,
+            workspace_id,
+            effective_session_id,
+        )
+
+        # Recent sessions: all within 48h, backfill to 10
+        recent_session_rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (s.session_id)
+                s.session_id, s.started_at, s.updated_at, s.model_tier,
+                u.summary,
+                (SELECT COUNT(*) FROM records r
+                 WHERE r.session_id = s.session_id
+                   AND r.record_type = 'observation') AS observation_count
+            FROM sessions s
+            LEFT JOIN understanding_records u ON u.id = s.session_understanding_id
+            WHERE s.workspace_id = $1
+              AND s.session_token != $2
+            ORDER BY s.session_id,
+                     CASE WHEN s.updated_at >= NOW() - INTERVAL '48 hours' THEN 0 ELSE 1 END,
+                     s.updated_at DESC
+            """,
+            workspace_id,
+            effective_session_id,
+        )
+        # Sort by latest activity, take all within 48h + backfill to 10
+        recent_session_rows = sorted(
+            recent_session_rows, key=lambda r: r["updated_at"], reverse=True
+        )
+        within_48h = [r for r in recent_session_rows if (current_time - r["updated_at"]).total_seconds() <= 48 * 3600]
+        beyond_48h = [r for r in recent_session_rows if (current_time - r["updated_at"]).total_seconds() > 48 * 3600]
+        recent_sessions_combined = within_48h + beyond_48h
+        recent_sessions_combined = recent_sessions_combined[:10]
+
+        # Consolidation mode extras
+        consolidation_stats = None
+        if mode == "consolidation":
+            current_generation = await get_workspace_generation(conn, workspace_id)
+            stats_row = await conn.fetchrow(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM subjects WHERE workspace_id = $1) AS subject_count,
+                    (SELECT COUNT(*) FROM observations WHERE workspace_id = $1) AS observation_count,
+                    (SELECT COUNT(*) FROM understandings
+                     WHERE workspace_id = $1 AND superseded_by IS NULL) AS understanding_count
+                """,
+                workspace_id,
+            )
+            consolidation_stats = {
+                "current_generation": current_generation,
+                "subject_count": stats_row["subject_count"],
+                "observation_count": stats_row["observation_count"],
+                "understanding_count": stats_row["understanding_count"],
+            }
+
         await record_event(
             conn,
             workspace_id=workspace_id,
             session_id=effective_session_id,
             operation="orient",
-            detail={"session_reset": True},
+            detail={"session_reset": True, "mode": mode},
         )
 
     def _pointer_payload(pointer_id: int | None, compaction_note: str | None) -> dict | None:
@@ -2467,11 +2621,34 @@ async def orient(
             "last_consolidation_event": last_consolidation_event,
         }
 
-    return {
+    result = {
         **documents,
         "pending_consolidation_count": pending_subjects or 0,
         "recent_activity": recent_activity,
+        "current_time": _format_timestamp_with_dow(current_time),
+        "this_session": (
+            {
+                "session_id": this_session_row["session_id"],
+                "started_at": _format_timestamp_with_dow(this_session_row["started_at"]),
+                "observation_count": this_session_row["observation_count"],
+            }
+            if this_session_row is not None
+            else None
+        ),
+        "recent_sessions": [
+            {
+                "started_at": _format_timestamp_with_dow(row["started_at"]),
+                "latest_activity": _format_timestamp_with_dow(row["updated_at"]),
+                "summary": row["summary"],
+                "observation_count": row["observation_count"],
+                "model_tier": row["model_tier"],
+            }
+            for row in recent_sessions_combined
+        ],
     }
+    if consolidation_stats is not None:
+        result.update(consolidation_stats)
+    return result
 
 
 async def finalize_consolidation(
@@ -2929,6 +3106,56 @@ async def bring_to_mind(
             },
         )
 
+    # Classify results into subjects, sessions, and direct hits
+    subjects_seen: dict[str, dict] = {}
+    session_hits: list[dict] = []
+    direct_hits: list[dict] = []
+
+    for item in filtered_results:
+        # Collect unique subjects from results
+        for name in item.get("subject_names", []):
+            if name not in subjects_seen:
+                subjects_seen[name] = {
+                    "name": name,
+                    "relevance_score": item["score"],
+                }
+
+        # Classify by type
+        if item["kind"] == "understanding" and item.get("understanding_kind") == "session":
+            session_hits.append({
+                "id": item["id"],
+                "summary": item["summary"],
+                "relevance_score": item["score"],
+            })
+        else:
+            direct_hits.append({
+                "id": item["id"],
+                "source": item["kind"],
+                "subject_names": item["subject_names"],
+                "summary": item["summary"],
+                "content": item["matched_content"],
+                "relevance_score": item["score"],
+                "generation": item["generation"],
+            })
+
+    # Enrich subjects with summaries from the database
+    if subjects_seen:
+        async with pool.acquire() as conn:
+            workspace_id = await resolve_workspace_id(conn, workspace_name)
+            subject_rows = await conn.fetch(
+                """
+                SELECT name, summary
+                FROM subjects
+                WHERE workspace_id = $1
+                  AND name = ANY($2)
+                """,
+                workspace_id,
+                list(subjects_seen.keys()),
+            )
+            for row in subject_rows:
+                if row["name"] in subjects_seen:
+                    subjects_seen[row["name"]]["summary"] = row["summary"]
+
     return {
         "compaction_note": (
             "DISPOSABLE: This entire response is ephemeral. All content is "
@@ -2937,18 +3164,13 @@ async def bring_to_mind(
         ),
         "heartbeat_token": heartbeat_token,
         "compaction_detected": compaction_detected,
-        "results": [
-            {
-                "id": item["id"],
-                "source": item["kind"],
-                "subject_names": item["subject_names"],
-                "summary": item["summary"],
-                "content": item["matched_content"],
-                "relevance_score": item["score"],
-                "generation": item["generation"],
-            }
-            for item in filtered_results
-        ],
+        "subjects": sorted(
+            subjects_seen.values(),
+            key=lambda x: x["relevance_score"],
+            reverse=True,
+        ),
+        "sessions": session_hits,
+        "direct_hits": direct_hits,
     }
 
 
@@ -3827,4 +4049,663 @@ async def get_stats(
         ),
         "current_generation": row["current_generation"],
         "workspace": workspace_name,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Workspace activity broadcast
+# ---------------------------------------------------------------------------
+
+
+async def get_workspace_activity(
+    workspace: str | None = None,
+    session_id: str | None = None,
+) -> list[dict]:
+    """Return up to 5 recent items from other sessions since this session's last call."""
+    pool = await get_pool()
+    effective_session_id = resolve_optional_session_id(session_id)
+    workspace_name = resolve_effective_workspace_name(workspace)
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace_name)
+
+        # Get this session's previous updated_at (before current call updated it)
+        # Use a short lookback window as fallback for new sessions
+        since = await conn.fetchval(
+            """
+            SELECT COALESCE(
+                (SELECT updated_at FROM sessions
+                 WHERE workspace_id = $1 AND session_token = $2),
+                NOW() - INTERVAL '5 minutes'
+            )
+            """,
+            workspace_id,
+            effective_session_id,
+        )
+
+        rows = await conn.fetch(
+            """
+            SELECT
+                r.id,
+                r.record_type AS kind,
+                r.content,
+                r.created_at,
+                sess_u.summary AS session_summary
+            FROM records r
+            JOIN sessions s ON s.session_id = r.session_id
+            LEFT JOIN understanding_records sess_u ON sess_u.id = s.session_understanding_id
+            WHERE r.workspace_id = $1
+              AND s.session_token != $2
+              AND r.created_at > $3
+            ORDER BY r.created_at DESC
+            LIMIT 5
+            """,
+            workspace_id,
+            effective_session_id,
+            since,
+        )
+
+        if not rows:
+            return []
+
+        # Get subject names for the results
+        obs_ids = [row["id"] for row in rows if row["kind"] == "observation"]
+        und_ids = [row["id"] for row in rows if row["kind"] == "understanding"]
+        subject_names_by_id = await _get_subject_names_for_targets(
+            conn, obs_ids, und_ids
+        )
+
+    return [
+        {
+            "id": row["id"],
+            "kind": row["kind"],
+            "session_summary": row["session_summary"],
+            "subject_names": subject_names_by_id.get(row["id"], []),
+            "content_preview": " ".join(row["content"].split()[:20]),
+            "created_at": row["created_at"].isoformat(),
+        }
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Session entity tools
+# ---------------------------------------------------------------------------
+
+
+def _format_timestamp_with_dow(dt) -> str | None:
+    """Format a datetime as ISO string with day of week."""
+    if dt is None:
+        return None
+    dow = dt.strftime("%A")
+    return f"{dt.isoformat()} ({dow})"
+
+
+async def describe_session(
+    content: str | None = None,
+    summary: str | None = None,
+    target_session_id: int | None = None,
+    workspace: str | None = None,
+    session_id: str | None = None,
+    readonly: bool | None = None,
+) -> dict:
+    """Create or update a session's understanding."""
+    ensure_request_writable(readonly)
+    if content is None and summary is None:
+        raise ValueError("At least one of content or summary must be provided")
+
+    pool = await get_pool()
+    effective_session_id = resolve_optional_session_id(session_id)
+    workspace_name = resolve_effective_workspace_name(workspace)
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace_name)
+
+        if target_session_id is not None:
+            # Consolidation mode: verify the calling session is in consolidation mode
+            calling_session_row_id = await resolve_session_id(
+                conn, workspace_id=workspace_id, session_token=effective_session_id
+            )
+            consolidation_event = await conn.fetchval(
+                """
+                SELECT detail->>'mode'
+                FROM events
+                WHERE workspace_id = $1
+                  AND session_id = $2
+                  AND operation = 'orient'
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                workspace_id,
+                calling_session_row_id,
+            )
+            if consolidation_event != "consolidation":
+                raise PermissionError(
+                    "session_id parameter is only allowed in consolidation mode"
+                )
+            session_row = await conn.fetchrow(
+                """
+                SELECT session_id, started_at, session_understanding_id
+                FROM sessions
+                WHERE workspace_id = $1 AND session_id = $2
+                """,
+                workspace_id,
+                target_session_id,
+            )
+            if session_row is None:
+                raise ValueError(f"Session {target_session_id} not found")
+        else:
+            # Live mode: target the current session
+            session_row_id = await resolve_session_id(
+                conn, workspace_id=workspace_id, session_token=effective_session_id
+            )
+            session_row = await conn.fetchrow(
+                """
+                SELECT session_id, started_at, session_understanding_id
+                FROM sessions
+                WHERE session_id = $1
+                """,
+                session_row_id,
+            )
+
+        understanding_id = session_row["session_understanding_id"]
+
+        if understanding_id is not None:
+            # Rewrite in place
+            if content is not None:
+                await conn.execute(
+                    "UPDATE records SET content = $2 WHERE id = $1",
+                    understanding_id,
+                    content,
+                )
+            if summary is not None:
+                await conn.execute(
+                    "UPDATE understanding_records SET summary = $2 WHERE id = $1",
+                    understanding_id,
+                    summary,
+                )
+            embed_content = content
+            if embed_content is None:
+                embed_content = await conn.fetchval(
+                    "SELECT content FROM records WHERE id = $1",
+                    understanding_id,
+                )
+            await embed_targets(
+                conn,
+                workspace_id=workspace_id,
+                targets=[(understanding_id, embed_content)],
+            )
+        else:
+            # Create new session understanding
+            model_tier = await _get_session_model_tier(
+                conn, workspace_id, effective_session_id
+            )
+            generation = await get_workspace_generation(conn, workspace_id)
+            understanding = await _create_understanding_record(
+                conn,
+                workspace_id=workspace_id,
+                subject_rows=[],
+                content=content or "",
+                summary=summary or "",
+                kind="session",
+                generation=generation,
+                session_id=effective_session_id,
+                model_tier=model_tier,
+            )
+            understanding_id = understanding["id"]
+            await conn.execute(
+                """
+                UPDATE sessions
+                SET session_understanding_id = $2
+                WHERE session_id = $1
+                """,
+                session_row["session_id"],
+                understanding_id,
+            )
+
+        await record_event(
+            conn,
+            workspace_id=workspace_id,
+            session_id=effective_session_id,
+            operation="describe_session",
+            detail={
+                "target_session_id": session_row["session_id"],
+                "understanding_id": understanding_id,
+            },
+        )
+
+    final_summary = summary
+    if final_summary is None and understanding_id is not None:
+        async with pool.acquire() as conn:
+            final_summary = await conn.fetchval(
+                "SELECT summary FROM understanding_records WHERE id = $1",
+                understanding_id,
+            )
+
+    return {
+        "session_id": session_row["session_id"],
+        "summary": final_summary,
+        "started_at": _format_timestamp_with_dow(session_row["started_at"]),
+    }
+
+
+async def what_happened(
+    target_session_id: int,
+    workspace: str | None = None,
+) -> dict:
+    """Retrieve the full episodic record of a session."""
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+
+        session_row = await conn.fetchrow(
+            """
+            SELECT s.session_id, s.started_at, s.updated_at,
+                   s.session_understanding_id
+            FROM sessions s
+            WHERE s.workspace_id = $1 AND s.session_id = $2
+            """,
+            workspace_id,
+            target_session_id,
+        )
+        if session_row is None:
+            raise ValueError(f"Session {target_session_id} not found")
+
+        # Get session understanding if it exists
+        session_summary = None
+        session_content = None
+        if session_row["session_understanding_id"] is not None:
+            u_row = await conn.fetchrow(
+                """
+                SELECT u.content, u.summary
+                FROM understandings u
+                WHERE u.id = $1 AND u.superseded_by IS NULL
+                """,
+                session_row["session_understanding_id"],
+            )
+            if u_row is not None:
+                session_summary = u_row["summary"]
+                session_content = u_row["content"]
+
+        # Get all observations in creation order
+        obs_rows = await conn.fetch(
+            """
+            SELECT o.id, o.content, o.kind, o.created_at, o.generation
+            FROM observations o
+            WHERE o.session_id = $1
+            ORDER BY o.created_at ASC
+            """,
+            session_row["session_id"],
+        )
+
+        observation_ids = [row["id"] for row in obs_rows]
+        subject_names_by_id = await _get_subject_names_for_targets(
+            conn, observation_ids, []
+        )
+
+    return {
+        "session": {
+            "session_id": session_row["session_id"],
+            "started_at": _format_timestamp_with_dow(session_row["started_at"]),
+            "latest_activity": _format_timestamp_with_dow(session_row["updated_at"]),
+            "summary": session_summary,
+            "content": session_content,
+        },
+        "observations": [
+            {
+                "id": row["id"],
+                "content": row["content"],
+                "kind": row["kind"],
+                "subject_names": subject_names_by_id.get(row["id"], []),
+                "created_at": _format_timestamp_with_dow(row["created_at"]),
+                "generation": row["generation"],
+            }
+            for row in obs_rows
+        ],
+    }
+
+
+async def list_sessions(
+    limit: int = 10,
+    active_within_hours: float | None = 24,
+    after: str | None = None,
+    before: str | None = None,
+    workspace: str | None = None,
+) -> list[dict]:
+    """List recent and/or active sessions with metadata."""
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+
+        # Build filter conditions
+        conditions = ["s.workspace_id = $1"]
+        params: list = [workspace_id]
+        param_idx = 2
+
+        if after is not None or before is not None:
+            # Date range mode — ignore active_within_hours
+            if after is not None:
+                conditions.append(f"s.started_at >= ${param_idx}::timestamptz")
+                params.append(after)
+                param_idx += 1
+            if before is not None:
+                conditions.append(f"s.started_at <= ${param_idx}::timestamptz")
+                params.append(before)
+                param_idx += 1
+        elif active_within_hours is not None:
+            conditions.append(
+                f"s.updated_at >= NOW() - make_interval(secs => ${param_idx}::int)"
+            )
+            params.append(int(active_within_hours * 3600))
+            param_idx += 1
+
+        where_clause = " AND ".join(conditions)
+        params.append(limit)
+
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                s.session_id,
+                s.started_at,
+                s.updated_at AS latest_activity,
+                s.model_tier,
+                u.summary,
+                (SELECT COUNT(*)
+                 FROM records r
+                 WHERE r.session_id = s.session_id
+                   AND r.record_type = 'observation') AS observation_count,
+                (SELECT o.content
+                 FROM observations o
+                 WHERE o.session_id = s.session_id AND o.kind = 'transitional'
+                 ORDER BY o.created_at DESC
+                 LIMIT 1) AS last_transitional_observation
+            FROM sessions s
+            LEFT JOIN understanding_records u ON u.id = s.session_understanding_id
+            WHERE {where_clause}
+            ORDER BY s.updated_at DESC
+            LIMIT ${param_idx}
+            """,
+            *params,
+        )
+
+    return [
+        {
+            "session_id": row["session_id"],
+            "started_at": _format_timestamp_with_dow(row["started_at"]),
+            "latest_activity": _format_timestamp_with_dow(row["latest_activity"]),
+            "summary": row["summary"],
+            "last_transitional_observation": row["last_transitional_observation"],
+            "observation_count": row["observation_count"],
+            "model_tier": row["model_tier"],
+        }
+        for row in rows
+    ]
+
+
+async def review_sessions(
+    workspace: str | None = None,
+) -> dict:
+    """Return sessions needing understandings for consolidation."""
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+
+        rows = await conn.fetch(
+            """
+            SELECT
+                s.session_id,
+                s.started_at,
+                s.updated_at AS latest_activity,
+                s.session_understanding_id IS NOT NULL AS has_understanding,
+                (SELECT COUNT(*)
+                 FROM records r
+                 WHERE r.session_id = s.session_id
+                   AND r.record_type = 'observation') AS observation_count
+            FROM sessions s
+            WHERE s.workspace_id = $1
+              AND EXISTS (
+                  SELECT 1 FROM records r
+                  WHERE r.session_id = s.session_id
+                    AND r.record_type = 'observation'
+              )
+              AND (
+                  s.session_understanding_id IS NULL
+                  OR s.updated_at > (
+                      SELECT r.created_at FROM records r
+                      WHERE r.id = s.session_understanding_id
+                  )
+              )
+            ORDER BY s.started_at ASC
+            """,
+            workspace_id,
+        )
+
+    return {
+        "sessions": [
+            {
+                "session_id": row["session_id"],
+                "started_at": _format_timestamp_with_dow(row["started_at"]),
+                "latest_activity": _format_timestamp_with_dow(row["latest_activity"]),
+                "observation_count": row["observation_count"],
+                "has_understanding": row["has_understanding"],
+            }
+            for row in rows
+        ],
+    }
+
+
+async def review_subjects(
+    workspace: str | None = None,
+) -> dict:
+    """Return orphaned subjects and stale understandings for consolidation."""
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+        current_generation = await get_workspace_generation(conn, workspace_id)
+
+        orphaned_subjects = await conn.fetch(
+            """
+            SELECT s.name, COUNT(os.observation_id) AS observation_count
+            FROM subjects s
+            JOIN observation_subjects os ON os.subject_id = s.id
+            JOIN observations o ON o.id = os.observation_id
+            WHERE s.workspace_id = $1
+              AND s.single_subject_understanding_id IS NULL
+              AND o.generation > COALESCE(s.last_reviewed_generation, -1)
+            GROUP BY s.id
+            ORDER BY observation_count DESC, s.name
+            """,
+            workspace_id,
+        )
+
+        stale_understandings = await conn.fetch(
+            """
+            SELECT u.id, u.summary, u.generation, u.created_at
+            FROM subjects s
+            JOIN understandings u ON u.id = s.single_subject_understanding_id
+            WHERE s.workspace_id = $1
+              AND u.superseded_by IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM observations o
+                  JOIN observation_subjects os ON os.observation_id = o.id
+                  WHERE os.subject_id = s.id
+                    AND o.generation > GREATEST(u.generation, COALESCE(s.last_reviewed_generation, -1))
+              )
+            ORDER BY u.created_at DESC
+            """,
+            workspace_id,
+        )
+
+        stale_subject_names = []
+        if stale_understandings:
+            names_map = await _get_subject_names_for_targets(
+                conn,
+                [],
+                [row["id"] for row in stale_understandings],
+            )
+            stale_subject_names = [
+                {
+                    "id": row["id"],
+                    "subject_names": names_map.get(row["id"], []),
+                    "summary": row["summary"],
+                    "generation": row["generation"],
+                    "last_updated": row["created_at"].isoformat(),
+                }
+                for row in stale_understandings
+            ]
+
+    return {
+        "orphaned_subjects": [
+            {"name": row["name"], "observation_count": row["observation_count"]}
+            for row in orphaned_subjects
+        ],
+        "stale_understandings": stale_subject_names,
+    }
+
+
+async def review_intersections(
+    workspace: str | None = None,
+) -> dict:
+    """Return intersection candidates for consolidation."""
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+        current_generation = await get_workspace_generation(conn, workspace_id)
+
+        intersections_needing_synthesis = await conn.fetch(
+            """
+            WITH current_pairs AS (
+                SELECT
+                    LEAST(s1.name, s2.name) AS subject_a,
+                    GREATEST(s1.name, s2.name) AS subject_b,
+                    LEAST(os1.subject_id, os2.subject_id) AS id_a,
+                    GREATEST(os1.subject_id, os2.subject_id) AS id_b,
+                    COUNT(*) AS new_generation_count
+                FROM observations o
+                JOIN observation_subjects os1 ON os1.observation_id = o.id
+                JOIN observation_subjects os2 ON os2.observation_id = o.id
+                JOIN subjects s1 ON s1.id = os1.subject_id
+                JOIN subjects s2 ON s2.id = os2.subject_id
+                WHERE o.workspace_id = $1
+                  AND o.generation = $2
+                  AND os1.subject_id < os2.subject_id
+                GROUP BY subject_a, subject_b, id_a, id_b
+            )
+            SELECT *
+            FROM current_pairs
+            ORDER BY new_generation_count DESC, subject_a, subject_b
+            """,
+            workspace_id,
+            current_generation,
+        )
+
+        existing_relationship_rows = {}
+        if intersections_needing_synthesis:
+            for row in intersections_needing_synthesis:
+                exact_ids = await _find_active_understanding_exact_subjects(
+                    conn,
+                    workspace_id=workspace_id,
+                    kind="relationship",
+                    subject_ids=[row["id_a"], row["id_b"]],
+                )
+                if exact_ids:
+                    rel_row = await conn.fetchrow(
+                        "SELECT id, summary FROM understandings WHERE id = $1",
+                        exact_ids[0],
+                    )
+                    existing_relationship_rows[(row["id_a"], row["id_b"])] = rel_row
+
+        semantically_dense_intersections = await conn.fetch(
+            """
+            WITH general_perspective AS (
+                SELECT id
+                FROM perspectives
+                WHERE workspace_id = $1 OR workspace_id IS NULL
+                ORDER BY CASE WHEN name = 'general' THEN 0 ELSE 1 END, workspace_id NULLS LAST
+                LIMIT 1
+            ),
+            pair_overlap AS (
+                SELECT
+                    LEAST(os1.subject_id, os2.subject_id) AS subject_a_id,
+                    GREATEST(os1.subject_id, os2.subject_id) AS subject_b_id,
+                    COUNT(*) AS intersection_size
+                FROM observation_subjects os1
+                JOIN observation_subjects os2
+                  ON os1.observation_id = os2.observation_id
+                JOIN observations o ON o.id = os1.observation_id
+                WHERE o.workspace_id = $1
+                  AND os1.subject_id < os2.subject_id
+                GROUP BY 1, 2
+            )
+            SELECT
+                sa.id AS subject_a_id,
+                sa.name AS subject_a,
+                sb.id AS subject_b_id,
+                sb.name AS subject_b,
+                pair_overlap.intersection_size,
+                1 - (ea.vector <=> eb.vector) AS similarity_score
+            FROM pair_overlap
+            JOIN subjects sa ON sa.id = pair_overlap.subject_a_id
+            JOIN subjects sb ON sb.id = pair_overlap.subject_b_id
+            JOIN general_perspective gp ON TRUE
+            JOIN embeddings ea
+              ON ea.target_id = sa.single_subject_understanding_id
+             AND ea.workspace_id = $1
+             AND ea.perspective_id = gp.id
+            JOIN embeddings eb
+              ON eb.target_id = sb.single_subject_understanding_id
+             AND eb.workspace_id = $1
+             AND eb.perspective_id = gp.id
+            WHERE pair_overlap.intersection_size >= $2
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM understandings u
+                  JOIN understanding_subjects usa ON usa.understanding_id = u.id
+                  JOIN understanding_subjects usb
+                    ON usb.understanding_id = u.id
+                  WHERE u.workspace_id = $1
+                    AND u.kind = 'relationship'
+                    AND u.superseded_by IS NULL
+                    AND usa.subject_id = sa.id
+                    AND usb.subject_id = sb.id
+              )
+            ORDER BY similarity_score DESC, pair_overlap.intersection_size DESC
+            LIMIT 10
+            """,
+            workspace_id,
+            settings.dense_intersection_min_size,
+        )
+
+    return {
+        "intersections_needing_synthesis": [
+            {
+                "subject_a": row["subject_a"],
+                "subject_b": row["subject_b"],
+                "intersection_size": row["new_generation_count"],
+                "existing_understanding": (
+                    {
+                        "id": existing_relationship_rows[(row["id_a"], row["id_b"])]["id"],
+                        "summary": existing_relationship_rows[(row["id_a"], row["id_b"])]["summary"],
+                    }
+                    if (row["id_a"], row["id_b"]) in existing_relationship_rows
+                    else None
+                ),
+            }
+            for row in intersections_needing_synthesis
+        ],
+        "semantically_dense_intersections": [
+            {
+                "subject_a": row["subject_a"],
+                "subject_b": row["subject_b"],
+                "similarity_score": float(row["similarity_score"]),
+                "intersection_size": row["intersection_size"],
+            }
+            for row in semantically_dense_intersections
+        ],
     }
