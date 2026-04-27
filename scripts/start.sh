@@ -13,21 +13,23 @@ fi
 
 DOCKER_CMD="${DOCKER_CMD:-docker}"
 
+COMPOSE_DEV="$DOCKER_CMD compose -f docker-compose.dev.yml"
+
 # --- Start Postgres if not already running ---
 echo "==> Starting Postgres..."
-$DOCKER_CMD compose -f docker-compose.dev.yml up -d postgres
+$COMPOSE_DEV up -d postgres 2>/dev/null || $COMPOSE_DEV up -d postgres
 
 echo "==> Waiting for Postgres to be ready..."
-until $DOCKER_CMD compose exec -T postgres pg_isready -U memory -q; do
+until $COMPOSE_DEV exec -T postgres pg_isready -U memory -q; do
     sleep 1
 done
 echo "    Postgres is ready."
 
 echo "==> Ensuring v3 database exists..."
-if ! $DOCKER_CMD compose exec -T postgres \
+if ! $COMPOSE_DEV exec -T postgres \
     psql -U memory -tAc "SELECT 1 FROM pg_database WHERE datname = 'memory_v3'" \
     | grep -q 1; then
-    $DOCKER_CMD compose exec -T postgres psql -U memory -c "CREATE DATABASE memory_v3"
+    $COMPOSE_DEV exec -T postgres psql -U memory -c "CREATE DATABASE memory_v3"
 fi
 
 # --- Run migrations ---
