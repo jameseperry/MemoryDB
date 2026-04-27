@@ -2093,7 +2093,7 @@ async def search(
 
 async def recall(
     question_or_subject_name: str,
-    search: str | None = None,
+    search_query: str | None = None,
     workspace: str | None = None,
 ) -> dict:
     """Directed retrieval for a subject name or natural-language question."""
@@ -2135,7 +2135,7 @@ async def recall(
                 structural_understanding = structural_rows[
                     subject_row["structural_understanding_id"]
                 ]
-            if search is not None:
+            if search_query is not None:
                 # Scoped semantic search within this subject's observations
                 from memory_v3.embeddings import embed_query, get_perspectives
                 perspectives = await get_perspectives(conn, workspace_id)
@@ -2143,7 +2143,7 @@ async def recall(
                     import asyncio
                     loop = asyncio.get_event_loop()
                     query_vector = await loop.run_in_executor(
-                        None, embed_query, search, perspectives[0]["instruction"]
+                        None, embed_query, search_query, perspectives[0]["instruction"]
                     )
                     recent_observations = await conn.fetch(
                         """

@@ -178,7 +178,7 @@ async def recall(
     problem is that you may not know what prior context exists.
     """
     _log_tool_call("recall")
-    result = await tools.recall(question_or_subject_name, search=search)
+    result = await tools.recall(question_or_subject_name, search_query=search)
     return await _inject_workspace_activity(result)
 
 
