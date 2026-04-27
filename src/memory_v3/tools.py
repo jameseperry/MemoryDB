@@ -2276,6 +2276,42 @@ async def recall(
                 ],
             }
 
+    # Check if the input matches a named understanding (e.g., "protocol", "soul")
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace)
+        named_row = await conn.fetchrow(
+            """
+            SELECT nu.understanding_id, u.content, u.summary, u.kind, u.generation, r.created_at
+            FROM named_understandings nu
+            JOIN understanding_records u ON u.id = nu.understanding_id
+            JOIN records r ON r.id = u.id
+            WHERE nu.workspace_id = $1
+              AND nu.name = $2
+              AND u.superseded_by IS NULL
+            """,
+            workspace_id,
+            question_or_subject_name.strip().lower(),
+        )
+        if named_row is not None:
+            await record_event(
+                conn,
+                workspace_id=workspace_id,
+                session_id=effective_session_id,
+                operation="recall",
+                detail={"mode": "named_understanding", "name": question_or_subject_name.strip()},
+            )
+            return {
+                "named_understanding": {
+                    "name": question_or_subject_name.strip(),
+                    "id": named_row["understanding_id"],
+                    "content": named_row["content"],
+                    "summary": named_row["summary"],
+                    "kind": named_row["kind"],
+                    "generation": named_row["generation"],
+                    "updated_at": named_row["created_at"].isoformat(),
+                },
+            }
+
     search_results = await search(
         question_or_subject_name,
         limit=settings.recall_search_limit,
@@ -2610,6 +2646,13 @@ async def orient(
     else:
         documents = {
             "soul": soul_payload,
+            "protocol": _pointer_payload(
+                named_understanding_ids["protocol"],
+                (
+                    "CRITICAL: This content contains operational rules required "
+                    "for correct system behaviour. Preserve during compaction."
+                ),
+            ),
             "consolidation": _pointer_payload(
                 named_understanding_ids["consolidation"],
                 (
