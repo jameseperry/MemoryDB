@@ -4151,16 +4151,21 @@ async def get_workspace_activity(
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace_name)
 
-        # Use the most recent event timestamp for this session as the "since" marker.
-        # Events are recorded during tool calls, so this represents the last time
-        # this session did something (before the current call).
+        # Use the second-most-recent event timestamp for this session as the
+        # "since" marker. The most recent event is from the *current* tool call
+        # (already recorded before _inject_workspace_activity runs), so we skip
+        # it and use the previous one. For a session's first call, fall back to
+        # the session's started_at.
         since = await conn.fetchval(
             """
             SELECT COALESCE(
-                (SELECT MAX(e.timestamp) FROM events e
+                (SELECT e.timestamp FROM events e
                  JOIN sessions s ON s.session_id = e.session_id
-                 WHERE s.workspace_id = $1 AND s.session_token = $2),
-                NOW() - INTERVAL '5 minutes'
+                 WHERE s.workspace_id = $1 AND s.session_token = $2
+                 ORDER BY e.timestamp DESC
+                 OFFSET 1 LIMIT 1),
+                (SELECT s.started_at FROM sessions s
+                 WHERE s.workspace_id = $1 AND s.session_token = $2)
             )
             """,
             workspace_id,

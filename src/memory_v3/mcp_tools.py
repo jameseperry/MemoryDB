@@ -53,8 +53,8 @@ async def _inject_workspace_activity(result: dict) -> dict:
         activity = await tools.get_workspace_activity()
         if activity:
             result["workspace_activity"] = activity
-    except Exception:
-        pass  # Don't fail the tool call if activity query fails
+    except Exception as exc:
+        logger.warning("workspace_activity failed: %s", exc)
     return result
 
 
