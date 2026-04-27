@@ -15,7 +15,7 @@ DOCKER_CMD="${DOCKER_CMD:-docker}"
 
 # --- Start Postgres if not already running ---
 echo "==> Starting Postgres..."
-$DOCKER_CMD compose up -d postgres
+$DOCKER_CMD compose -f docker-compose.dev.yml up -d postgres
 
 echo "==> Waiting for Postgres to be ready..."
 until $DOCKER_CMD compose exec -T postgres pg_isready -U memory -q; do

@@ -702,7 +702,7 @@ def database() -> None:
 @click.option(
     "--method",
     type=click.Choice(["auto", "local", "docker"], case_sensitive=False),
-    default="auto",
+    default="docker",
     show_default=True,
     help="How to run PostgreSQL tooling.",
 )
@@ -717,7 +717,7 @@ def database_backup(ctx: click.Context, path: str, method: str) -> None:
 @click.option(
     "--method",
     type=click.Choice(["auto", "local", "docker"], case_sensitive=False),
-    default="auto",
+    default="docker",
     show_default=True,
     help="How to run PostgreSQL tooling.",
 )
