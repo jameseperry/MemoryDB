@@ -4151,13 +4151,15 @@ async def get_workspace_activity(
     async with pool.acquire() as conn:
         workspace_id = await resolve_workspace_id(conn, workspace_name)
 
-        # Get this session's previous updated_at (before current call updated it)
-        # Use a short lookback window as fallback for new sessions
+        # Use the most recent event timestamp for this session as the "since" marker.
+        # Events are recorded during tool calls, so this represents the last time
+        # this session did something (before the current call).
         since = await conn.fetchval(
             """
             SELECT COALESCE(
-                (SELECT updated_at FROM sessions
-                 WHERE workspace_id = $1 AND session_token = $2),
+                (SELECT MAX(e.timestamp) FROM events e
+                 JOIN sessions s ON s.session_id = e.session_id
+                 WHERE s.workspace_id = $1 AND s.session_token = $2),
                 NOW() - INTERVAL '5 minutes'
             )
             """,
