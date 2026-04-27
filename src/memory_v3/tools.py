@@ -974,7 +974,7 @@ async def get_subjects(
         results.append(
             {
                 "name": row["name"],
-                "summary": row["summary"],
+                "summary": single_row["summary"] if single_row else row["summary"],
                 "tags": list(row["tags"]),
                 "single_subject_understanding": (
                     {
@@ -1145,11 +1145,13 @@ async def get_subjects_by_tag(
         workspace_id = await resolve_workspace_id(conn, workspace)
         rows = await conn.fetch(
             """
-            SELECT name, summary, tags
-            FROM subjects
-            WHERE workspace_id = $1
-              AND $2 = ANY(tags)
-            ORDER BY name
+            SELECT s.name, COALESCE(u.summary, s.summary) AS summary, s.tags
+            FROM subjects s
+            LEFT JOIN understanding_records u
+                ON u.id = s.single_subject_understanding_id
+            WHERE s.workspace_id = $1
+              AND $2 = ANY(s.tags)
+            ORDER BY s.name
             """,
             workspace_id,
             tag,
@@ -2230,7 +2232,11 @@ async def recall(
             return {
                 "subject": {
                     "name": subject_row["name"],
-                    "summary": subject_row["summary"],
+                    "summary": (
+                        single_understanding["summary"]
+                        if single_understanding
+                        else subject_row["summary"]
+                    ),
                     "tags": list(subject_row["tags"]),
                 },
                 "single_subject_understanding": (
@@ -3185,10 +3191,12 @@ async def bring_to_mind(
         if subjects_seen:
             subject_rows = await conn.fetch(
                 """
-                SELECT name, summary
-                FROM subjects
-                WHERE workspace_id = $1
-                  AND name = ANY($2)
+                SELECT s.name, COALESCE(u.summary, s.summary) AS summary
+                FROM subjects s
+                LEFT JOIN understanding_records u
+                    ON u.id = s.single_subject_understanding_id
+                WHERE s.workspace_id = $1
+                  AND s.name = ANY($2)
                 """,
                 workspace_id,
                 list(subjects_seen.keys()),
@@ -3598,10 +3606,19 @@ async def open_around(
                     )
                     relationship_ids[row["id"]] = rel_row
 
+    # Get understanding summary for primary subject
+    primary_understanding_summary = None
+    if subject_row["single_subject_understanding_id"] is not None:
+        async with pool.acquire() as conn2:
+            primary_understanding_summary = await conn2.fetchval(
+                "SELECT summary FROM understanding_records WHERE id = $1",
+                subject_row["single_subject_understanding_id"],
+            )
+
     return {
         "subject": {
             "name": subject_row["name"],
-            "summary": subject_row["summary"],
+            "summary": primary_understanding_summary or subject_row["summary"],
             "tags": list(subject_row["tags"]),
         },
         "neighbors": [
