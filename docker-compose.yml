@@ -25,6 +25,9 @@ services:
       MCP_PORT: "8765"
     ports:
       - "${MCP_HOST_PORT:-8765}:8765"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
 
 volumes:
   postgres_data:

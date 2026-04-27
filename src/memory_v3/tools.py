@@ -4134,11 +4134,18 @@ async def get_workspace_activity(
 
 
 def _format_timestamp_with_dow(dt) -> str | None:
-    """Format a datetime as ISO string with day of week."""
+    """Format a datetime as ISO string with day of week, in local timezone."""
     if dt is None:
         return None
-    dow = dt.strftime("%A")
-    return f"{dt.isoformat()} ({dow})"
+    from datetime import timezone as tz
+
+    # Convert to local timezone if the datetime is timezone-aware
+    if dt.tzinfo is not None:
+        local_dt = dt.astimezone()  # converts to system local timezone
+    else:
+        local_dt = dt
+    dow = local_dt.strftime("%A")
+    return f"{local_dt.isoformat()} ({dow})"
 
 
 async def describe_session(
