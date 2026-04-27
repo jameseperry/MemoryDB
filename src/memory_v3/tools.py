@@ -2281,7 +2281,7 @@ async def recall(
         workspace_id = await resolve_workspace_id(conn, workspace)
         named_row = await conn.fetchrow(
             """
-            SELECT nu.understanding_id, u.content, u.summary, u.kind, u.generation, r.created_at
+            SELECT nu.understanding_id, r.content, u.summary, u.kind, u.generation, r.created_at
             FROM named_understandings nu
             JOIN understanding_records u ON u.id = nu.understanding_id
             JOIN records r ON r.id = u.id
