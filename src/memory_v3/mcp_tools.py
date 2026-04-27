@@ -47,6 +47,17 @@ def _log_tool_call(tool_name: str) -> None:
     )
 
 
+async def _ensure_active_session() -> None:
+    """Check that this session has been activated via orient or rejoin_session."""
+    from memory_v3.db import get_pool, resolve_effective_workspace_name, resolve_optional_session_id, resolve_workspace_id
+    pool = await get_pool()
+    session_token = resolve_optional_session_id()
+    workspace_name = resolve_effective_workspace_name(None)
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace_name)
+        await tools._ensure_session_active(conn, workspace_id, session_token)
+
+
 async def _inject_workspace_activity(result: dict) -> dict:
     """Add workspace_activity to a tool response."""
     try:
@@ -146,6 +157,7 @@ async def bring_to_mind(
     - `usage_hint`: reminder that surfaced items are candidates, not truth
     """
     _log_tool_call("bring_to_mind")
+    await _ensure_active_session()
     result = await tools.bring_to_mind(
         topic_or_context,
         last_token=last_token,
@@ -178,6 +190,7 @@ async def recall(
     problem is that you may not know what prior context exists.
     """
     _log_tool_call("recall")
+    await _ensure_active_session()
     result = await tools.recall(question_or_subject_name, search_query=search)
     return await _inject_workspace_activity(result)
 
@@ -288,6 +301,7 @@ async def remember(
     subjects.
     """
     _log_tool_call("remember")
+    await _ensure_active_session()
     result = await tools.remember(
         subject_names,
         content,
@@ -331,6 +345,7 @@ async def update_understanding(
         reason: Optional explanation of why this revision was made.
     """
     _log_tool_call("update_understanding")
+    await _ensure_active_session()
     return await tools.update_understanding(
         understanding_id,
         new_content,
@@ -535,6 +550,20 @@ async def get_stats() -> dict:
 # ---------------------------------------------------------------------------
 
 
+async def rejoin_session(
+    session_id: int,
+) -> dict:
+    """Rejoin a previous session after MCP reconnection.
+
+    Use this when reconnecting to an ongoing conversation. The session_id
+    should be from a previous orient() call's this_session.session_id.
+    This merges the current connection into the previous session, preserving
+    session understanding and observation history.
+    """
+    _log_tool_call("rejoin_session")
+    return await tools.rejoin_session(target_session_id=session_id)
+
+
 async def describe_session(
     content: str | None = None,
     summary: str | None = None,
@@ -556,6 +585,7 @@ async def describe_session(
     `orient(mode="consolidation")` has been called).
     """
     _log_tool_call("describe_session")
+    await _ensure_active_session()
     result = await tools.describe_session(
         content=content,
         summary=summary,
@@ -578,6 +608,7 @@ async def what_happened(
     `bring_to_mind` or `recall`.
     """
     _log_tool_call("what_happened")
+    await _ensure_active_session()
     return await tools.what_happened(target_session_id=session_id)
 
 

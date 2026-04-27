@@ -23,6 +23,38 @@ from memory_v3.db import (
 from memory_v3.embeddings import embed_targets, search_embeddings
 
 
+_SESSION_NOT_ACTIVE_ERROR = (
+    "Session is not active. If this is a new session, call orient() first. "
+    "If this is a reconnection to an ongoing session, call rejoin_session(session_id) "
+    "with the session_id from your previous orient() call. If you don't know your "
+    "session_id (e.g., it was lost during context compaction), call sessions() to "
+    "list recent sessions and identify yours."
+)
+
+
+async def _ensure_session_active(
+    conn: asyncpg.Connection,
+    workspace_id: int,
+    session_token: str,
+) -> None:
+    """Raise if this session hasn't called orient or rejoin_session."""
+    has_activation = await conn.fetchval(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM events e
+            JOIN sessions s ON s.session_id = e.session_id
+            WHERE s.workspace_id = $1
+              AND s.session_token = $2
+              AND e.operation IN ('orient', 'rejoin_session')
+        )
+        """,
+        workspace_id,
+        session_token,
+    )
+    if not has_activation:
+        raise ValueError(_SESSION_NOT_ACTIVE_ERROR)
+
+
 SPECIAL_UNDERSTANDING_NAME_TO_COLUMN = {
     "soul": "soul_understanding_id",
     "protocol": "protocol_understanding_id",
@@ -4235,6 +4267,84 @@ def _format_timestamp_with_dow(dt) -> str | None:
         local_dt = dt
     dow = local_dt.strftime("%A")
     return f"{local_dt.isoformat()} ({dow})"
+
+
+async def rejoin_session(
+    target_session_id: int,
+    workspace: str | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """Rejoin a previous session after MCP reconnection.
+
+    Merges the current connection into an existing session by updating the
+    old session's token to the current one and removing the new empty session.
+    """
+    pool = await get_pool()
+    effective_session_id = resolve_optional_session_id(session_id)
+    workspace_name = resolve_effective_workspace_name(workspace)
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace_name)
+
+        # Verify the target session exists and belongs to this workspace
+        target_row = await conn.fetchrow(
+            """
+            SELECT session_id, started_at, session_understanding_id, session_token
+            FROM sessions
+            WHERE workspace_id = $1 AND session_id = $2
+            """,
+            workspace_id,
+            target_session_id,
+        )
+        if target_row is None:
+            raise ValueError(f"Session {target_session_id} not found")
+
+        # Get the current (new, empty) session row
+        current_row = await conn.fetchrow(
+            """
+            SELECT session_id, session_token
+            FROM sessions
+            WHERE workspace_id = $1 AND session_token = $2
+            """,
+            workspace_id,
+            effective_session_id,
+        )
+
+        if current_row is not None and current_row["session_id"] != target_session_id:
+            # Delete the new empty session
+            await conn.execute(
+                "DELETE FROM sessions WHERE session_id = $1",
+                current_row["session_id"],
+            )
+
+        # Update the old session's token to the current one
+        await conn.execute(
+            """
+            UPDATE sessions
+            SET session_token = $2, updated_at = NOW()
+            WHERE session_id = $1
+            """,
+            target_session_id,
+            effective_session_id,
+        )
+
+        # Record the rejoin event (this also activates the session)
+        session_row_id = await resolve_session_id(
+            conn, workspace_id=workspace_id, session_token=effective_session_id
+        )
+        await record_event(
+            conn,
+            workspace_id=workspace_id,
+            session_id=effective_session_id,
+            operation="rejoin_session",
+            detail={"target_session_id": target_session_id},
+        )
+
+    return {
+        "session_id": target_session_id,
+        "started_at": _format_timestamp_with_dow(target_row["started_at"]),
+        "rejoined": True,
+    }
 
 
 async def describe_session(

@@ -76,6 +76,7 @@ def create_mcp_server() -> FastMCP:
     mcp.add_tool(mcp_tools.get_status)
 
     # Session entity tools
+    mcp.add_tool(mcp_tools.rejoin_session)
     mcp.add_tool(mcp_tools.describe_session)
     mcp.add_tool(mcp_tools.what_happened)
     mcp.add_tool(mcp_tools.sessions)
