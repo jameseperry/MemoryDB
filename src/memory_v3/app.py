@@ -77,6 +77,7 @@ def create_mcp_server() -> FastMCP:
 
     # Session entity tools
     mcp.add_tool(mcp_tools.rejoin_session)
+    mcp.add_tool(mcp_tools.merge_sessions)
     mcp.add_tool(mcp_tools.describe_session)
     mcp.add_tool(mcp_tools.what_happened)
     mcp.add_tool(mcp_tools.sessions)

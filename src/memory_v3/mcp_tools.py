@@ -550,6 +550,23 @@ async def get_stats() -> dict:
 # ---------------------------------------------------------------------------
 
 
+async def merge_sessions(
+    primary_session_id: int,
+    merge_session_ids: list[int],
+) -> dict:
+    """Merge multiple sessions into a primary session.
+
+    Moves all records and events from the merge sessions to the primary.
+    Useful for cleaning up fragmented sessions from MCP reconnections.
+    """
+    _log_tool_call("merge_sessions")
+    await _ensure_active_session()
+    return await tools.merge_sessions(
+        primary_session_id,
+        merge_session_ids,
+    )
+
+
 async def rejoin_session(
     session_id: int,
 ) -> dict:

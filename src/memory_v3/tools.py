@@ -548,8 +548,8 @@ async def _set_session_model_tier(
 ) -> str | None:
     row = await conn.fetchrow(
         """
-        INSERT INTO sessions (workspace_id, session_token, seen_set_token, updated_at, model_tier)
-        VALUES ($1, $2, 0, NOW(), $3)
+        INSERT INTO sessions (workspace_id, session_token, seen_set_token, started_at, updated_at, model_tier)
+        VALUES ($1, $2, 0, NOW(), NOW(), $3)
         ON CONFLICT (workspace_id, session_token)
             DO UPDATE SET
                 model_tier = EXCLUDED.model_tier,
@@ -4328,10 +4328,8 @@ async def rejoin_session(
             effective_session_id,
         )
 
-        # Record the rejoin event (this also activates the session)
-        session_row_id = await resolve_session_id(
-            conn, workspace_id=workspace_id, session_token=effective_session_id
-        )
+        # Record the rejoin event — session now exists with the current token
+        session_row_id = target_session_id
         await record_event(
             conn,
             workspace_id=workspace_id,
@@ -4344,6 +4342,110 @@ async def rejoin_session(
         "session_id": target_session_id,
         "started_at": _format_timestamp_with_dow(target_row["started_at"]),
         "rejoined": True,
+    }
+
+
+async def merge_sessions(
+    primary_session_id: int,
+    merge_session_ids: list[int],
+    workspace: str | None = None,
+    session_id: str | None = None,
+    readonly: bool | None = None,
+) -> dict:
+    """Merge multiple sessions into a primary session.
+
+    Moves all records and events from the merge sessions to the primary.
+    If the primary has no session understanding but a merge session does,
+    adopts it. Deletes the merged session rows.
+    """
+    ensure_request_writable(readonly)
+    pool = await get_pool()
+    effective_session_id = resolve_optional_session_id(session_id)
+    workspace_name = resolve_effective_workspace_name(workspace)
+
+    async with pool.acquire() as conn:
+        workspace_id = await resolve_workspace_id(conn, workspace_name)
+
+        # Verify primary exists
+        primary_row = await conn.fetchrow(
+            "SELECT session_id, session_understanding_id FROM sessions WHERE workspace_id = $1 AND session_id = $2",
+            workspace_id,
+            primary_session_id,
+        )
+        if primary_row is None:
+            raise ValueError(f"Primary session {primary_session_id} not found")
+
+        merged_count = 0
+        for merge_id in merge_session_ids:
+            if merge_id == primary_session_id:
+                continue
+
+            merge_row = await conn.fetchrow(
+                "SELECT session_id, session_understanding_id FROM sessions WHERE workspace_id = $1 AND session_id = $2",
+                workspace_id,
+                merge_id,
+            )
+            if merge_row is None:
+                continue
+
+            # Move records to primary session
+            await conn.execute(
+                "UPDATE records SET session_id = $1 WHERE session_id = $2",
+                primary_session_id,
+                merge_id,
+            )
+
+            # Move events to primary session
+            await conn.execute(
+                "UPDATE events SET session_id = $1 WHERE session_id = $2",
+                primary_session_id,
+                merge_id,
+            )
+
+            # Move surfaced_in_session entries
+            await conn.execute(
+                "DELETE FROM surfaced_in_session WHERE session_id = $1",
+                merge_id,
+            )
+
+            # Adopt session understanding if primary doesn't have one
+            if (
+                primary_row["session_understanding_id"] is None
+                and merge_row["session_understanding_id"] is not None
+            ):
+                await conn.execute(
+                    "UPDATE sessions SET session_understanding_id = $2 WHERE session_id = $1",
+                    primary_session_id,
+                    merge_row["session_understanding_id"],
+                )
+                # Refresh primary_row for subsequent iterations
+                primary_row = await conn.fetchrow(
+                    "SELECT session_id, session_understanding_id FROM sessions WHERE session_id = $1",
+                    primary_session_id,
+                )
+
+            # Delete the merged session
+            await conn.execute(
+                "DELETE FROM sessions WHERE session_id = $1",
+                merge_id,
+            )
+            merged_count += 1
+
+        await record_event(
+            conn,
+            workspace_id=workspace_id,
+            session_id=effective_session_id,
+            operation="merge_sessions",
+            detail={
+                "primary_session_id": primary_session_id,
+                "merged_session_ids": merge_session_ids,
+                "merged_count": merged_count,
+            },
+        )
+
+    return {
+        "primary_session_id": primary_session_id,
+        "merged_count": merged_count,
     }
 
 

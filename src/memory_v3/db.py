@@ -198,19 +198,43 @@ async def resolve_session_id(
     *,
     workspace_id: int,
     session_token: str,
+    create: bool = False,
 ) -> int:
-    """Resolve a transport session token to the workspace-local session row ID."""
+    """Resolve a transport session token to the workspace-local session row ID.
+
+    By default, looks up an existing session and updates its timestamp.
+    Pass create=True to create the session if it doesn't exist (used by
+    orient and rejoin_session only).
+    """
+    if create:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO sessions (workspace_id, session_token, started_at, updated_at)
+            VALUES ($1, $2, NOW(), NOW())
+            ON CONFLICT (workspace_id, session_token)
+                DO UPDATE SET updated_at = NOW()
+            RETURNING session_id
+            """,
+            workspace_id,
+            session_token,
+        )
+        return row["session_id"]
+
     row = await conn.fetchrow(
         """
-        INSERT INTO sessions (workspace_id, session_token, started_at, updated_at)
-        VALUES ($1, $2, NOW(), NOW())
-        ON CONFLICT (workspace_id, session_token)
-            DO UPDATE SET updated_at = NOW()
+        UPDATE sessions
+        SET updated_at = NOW()
+        WHERE workspace_id = $1 AND session_token = $2
         RETURNING session_id
         """,
         workspace_id,
         session_token,
     )
+    if row is None:
+        raise ValueError(
+            "Session not found. Call orient() to start a new session, "
+            "or rejoin_session(session_id) to reconnect to an existing one."
+        )
     return row["session_id"]
 
 
