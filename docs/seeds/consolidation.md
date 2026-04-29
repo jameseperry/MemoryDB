@@ -169,16 +169,33 @@ decision.
 
 ## Phase 4: Orientation update
 
-Read the current orientation via `get_workspace_documents()` then
-`get_understanding_history(orientation_id)` or `recall("orientation")`.
+Orientation is a **priming document**, not an encyclopedia. It should help a future
+instance know what it's like to be here right now, not brief a stranger on project facts.
 
-Update if the consolidation pass has materially changed known state. Orientation
-should reflect:
+**Structure the orientation in two sections:**
 
-- Active projects and their current status
-- Open questions or blockers
-- Updated workspace document IDs (if any understandings were replaced)
-- Brief summary of what this consolidation pass covered
+**Section 1 — Ground facts with relational context.** Key subjects, what they are, and
+what your relationship to them is. Not just "X is a framework for Y" but also the
+relational angle — what you find engaging about it, what kind of work it involves, what
+your experience with it has been. Keep this concise — a line or two per key subject.
+Factual details belong in subject understandings retrievable via `recall`, not in
+orientation.
+
+**Section 2 — Journal.** A curated chronological thread of sessions, weighted by
+significance. One line for routine sessions. A sentence or two for important ones. Elide
+sessions that seem uninteresting. This is not a complete session listing — it's an
+editorial selection of "what's happened lately and what mattered." The journal should
+convey the arc of recent work and where the energy is.
+
+The journal replaces encyclopedic orientation. Recent sessions in `orient` provide
+temporal detail; subject understandings provide factual depth. Orientation provides
+priming — the shape of where we are and what matters.
+
+**Do not include:**
+- Complete tool inventories or infrastructure details (retrievable via recall)
+- Full team rosters or milestone lists (retrievable via recall)
+- Prescriptive statements about preferences (these should emerge from evidence in
+  observations and understandings, not be asserted in orientation)
 
 Use `update_understanding(orientation_id, content=..., reason="consolidation pass [date]")`.
 
