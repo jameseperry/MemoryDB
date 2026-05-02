@@ -59,7 +59,11 @@ async def _ensure_active_session() -> None:
 
 
 async def _inject_workspace_activity(result: dict) -> dict:
-    """Add workspace_activity to a tool response."""
+    """Add workspace_activity and server_time to a tool response."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    result["server_time"] = tools._format_timestamp_with_dow(now)
     try:
         activity = await tools.get_workspace_activity()
         if activity:
@@ -625,7 +629,6 @@ async def what_happened(
     `bring_to_mind` or `recall`.
     """
     _log_tool_call("what_happened")
-    await _ensure_active_session()
     return await tools.what_happened(target_session_id=session_id)
 
 
@@ -685,3 +688,15 @@ async def review_intersections() -> dict:
     """
     _log_tool_call("review_intersections")
     return await tools.review_intersections()
+
+
+async def check_in() -> dict:
+    """Lightweight check for cross-session activity.
+
+    Returns server_time and any workspace_activity from other sessions.
+    Call this periodically during long tasks to stay aware of what other
+    sessions are doing. No side effects beyond updating the activity
+    tracking timestamp.
+    """
+    _log_tool_call("check_in")
+    return await _inject_workspace_activity({})

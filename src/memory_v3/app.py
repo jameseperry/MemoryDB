@@ -84,5 +84,6 @@ def create_mcp_server() -> FastMCP:
     mcp.add_tool(mcp_tools.review_sessions)
     mcp.add_tool(mcp_tools.review_subjects)
     mcp.add_tool(mcp_tools.review_intersections)
+    mcp.add_tool(mcp_tools.check_in)
 
     return mcp
